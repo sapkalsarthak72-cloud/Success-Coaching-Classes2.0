@@ -1,0 +1,28 @@
+const { loadPortal } = require('./mock-gas');
+const path = require('path'); const vm=require('vm');
+const ctx = loadPortal(path.join(__dirname,'..','src','backend'));
+const run=c=>vm.runInContext(c,ctx);
+let f=0; const eq=(a,b,n)=>{ if(JSON.stringify(a)!==JSON.stringify(b)){f++;console.log('FAIL',n,JSON.stringify(a),'!=',JSON.stringify(b));} };
+const ps=s=>JSON.parse(JSON.stringify(run(`U.parseSchedule(${JSON.stringify(s)})`)));
+eq(ps('Mon/Wed/Fri 5 PM').days,[1,3,5],'days'); eq(ps('Mon/Wed/Fri 5 PM').time,'5:00 PM','time');
+eq(ps('Mon-Sat 4:30 PM - 6 PM').days,[1,2,3,4,5,6],'range'); eq(ps('Mon-Sat 4:30 PM - 6 PM').time,'4:30 PM - 6:00 PM','trange');
+eq(ps('Daily 7 AM').days,[1,2,3,4,5,6],'daily'); eq(ps('Sat-Mon 3pm').days,[0,1,6],'wrap');
+eq(ps('Tuesday & Thursday 5-6 PM').time,'5:00 PM - 6:00 PM','shared ampm'); eq(ps('nothing').ok,false,'bad');
+eq(run('U.amountInWords(30000)'),'Rupees Thirty Thousand Only','w1');
+eq(run('U.amountInWords(125050.5)'),'Rupees One Lakh Twenty Five Thousand Fifty and Fifty Paise Only','w2');
+eq(run('U.amountInWords(10000000)'),'Rupees One Crore Only','w3');
+eq(run('U.phone("+91 98765-43210")'),'9876543210','phone+91'); eq(run('U.phone("9123456780")'),'9123456780','phone91');
+eq(run('U.addDays("2026-02-28",1)'),'2026-03-01','adddays'); eq(run('U.monthEnd("2026-02")'),'2026-02-28','monthend');
+eq(run('U.daysBetween("2026-01-01","2026-03-01")'),59,'between');
+// bulk update path (>6 rows) + insert beyond maxRows
+run('setupPortal()');
+run('Db.resetMemo()');
+const rows=[]; for(let i=0;i<1200;i++) rows.push({StudentID:'S'+i,UserID:'U'+i,Name:'N'+i,Class:'10',Batch:'',Phone:'9000000000',Status:'ACTIVE',CreatedAt:'',UpdatedAt:''});
+ctx.__rows=rows; run('Db.insert("Students", __rows)');
+eq(run('Db.count("Students")'),1200,'insert 1200 beyond maxRows');
+run('Db.resetMemo()'); eq(run('Db.count("Students")'),1200,'reload 1200');
+run('Db.updateMany("Students", Db.all("Students").slice(10,30).map(r=>[r,{Name:"Changed"}]))');
+run('Db.resetMemo()'); eq(run('Db.all("Students").filter(r=>r.Name==="Changed").length'),20,'bulk update 20');
+eq(run('typeof Db.all("Students")[5].Phone'),'string','phone stays text');
+eq(run('Db.deleteWhere("Students", r=>r.Name==="Changed")'),20,'delete'); run('Db.resetMemo()'); eq(run('Db.count("Students")'),1180,'after delete');
+console.log(f?('FAILURES '+f):'unit ok');

@@ -1,0 +1,142 @@
+<script>
+/* Js_Misc — Notifications, Timetable, Settings */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, $$ = App.$$, esc = App.esc, icon = App.icon, ui = App.ui, fmt = App.fmt;
+
+  /* ============================================================ NOTIFICATIONS */
+  App.pages.notifications = {
+    render: function (root, params, token) {
+      var isAdmin = App.state.user.role === 'ADMIN', page = 1, items = [];
+      root.innerHTML = ui.pageHead('Notifications', isAdmin ? 'Messages sent to students and teachers.' : 'Updates from the institute and your teachers.',
+        isAdmin ? '<button type="button" class="btn" id="send-n">' + icon('send') + ' Send notification</button>' : '<button type="button" class="btn secondary" id="read-all">' + icon('check') + ' Mark all as read</button>') + '<div id="nl">' + ui.skeleton(5) + '</div>';
+      function paint(d) {
+        var html = items.length ? '<ul class="card list">' + items.map(function (n, i) {
+          return '<li class="list-item" style="align-items:flex-start' + (n.unread ? ';background:var(--primary-50)' : '') + '"><div class="avatar" style="' + (n.unread ? '' : 'background:#eef2f7;color:var(--muted)') + '">' + icon('bell') + '</div>' +
+            '<div class="grow"><div class="row between nowrapflex" style="align-items:flex-start"><div class="' + (n.unread ? 'bold' : 'bold') + '">' + esc(n.title) + (n.unread ? ' ' + ui.badge('New', 'primary') : '') + '</div><span class="xs muted nowrap">' + esc(fmt.dateTime(n.date)) + '</span></div>' +
+            '<div class="small" style="white-space:pre-line;margin-top:2px">' + esc(n.message) + '</div>' +
+            '<div class="xs muted" style="margin-top:4px">' + (isAdmin ? 'To: ' + esc(n.target === 'ALL' ? 'Everyone' : n.target.replace('CLASS_', 'Class ')) : (n.from ? 'From ' + esc(n.from) : '')) + '</div></div>' +
+            (isAdmin ? '<button type="button" class="btn ghost sm icon-only" data-del="' + i + '" aria-label="Delete notification">' + icon('trash') + '</button>' : '') + '</li>';
+        }).join('') + '</ul>' + (d.page < d.pages ? '<div class="center" style="margin-top:14px"><button type="button" class="btn secondary" id="more-n">Load more</button></div>' : '')
+          : '<div class="card">' + ui.empty({ icon: 'bell', title: 'No notifications', text: isAdmin ? 'Use "Send notification" to message students.' : 'You are all caught up.' }) + '</div>';
+        $('#nl').innerHTML = html;
+        var more = $('#more-n'); if (more) more.onclick = function () { page++; load(true); };
+      }
+      function load(append) {
+        return App.api('notifications.list', { page: page, pageSize: 20 }).then(function (d) {
+          if (!App.stillHere(token)) return;
+          items = append ? items.concat(d.items) : d.items;
+          if (!isAdmin) { App.setUnread(d.unread); App.state.user.unread = d.unread; }
+          paint(d);
+        });
+      }
+      $('#nl').onclick = function (e) {
+        var del = e.target.closest('[data-del]'); if (!del) return; var n = items[+del.dataset.del];
+        ui.confirm({ title: 'Delete notification', danger: true, confirmText: 'Delete', message: 'Delete "' + n.title + '" for everyone?' }).then(function (ok) {
+          if (ok) App.api('notifications.remove', { id: n.id }).then(function () { ui.toast('Notification deleted.', 'success'); page = 1; load(); }).catch(App.fail);
+        });
+      };
+      if (isAdmin) $('#send-n').onclick = function () { sendDialog(function () { page = 1; load(); }); };
+      else $('#read-all').onclick = function () {
+        ui.busy(this, App.api('notifications.markRead')).then(function () { items.forEach(function (n) { n.unread = false; }); App.setUnread(0); page = 1; load(); ui.toast('All notifications marked as read.', 'success'); }).catch(App.fail);
+      };
+      return load();
+    }
+  };
+
+  function sendDialog(done) {
+    var picked = null;
+    App.batches().then(function (batches) {
+      var opts = [{ value: 'ALL', label: 'Everyone' }].concat((App.state.info.classes || []).map(function (c) { return { value: 'CLASS_' + c, label: 'All of Class ' + c }; }))
+        .concat(batches.filter(function (b) { return b.status === 'ACTIVE'; }).map(function (b) { return { value: b.batch, label: 'Batch ' + b.batch + ' \u2014 ' + b.subject }; })).concat([{ value: '__STUDENT', label: 'One student\u2026' }]);
+      ui.formModal({
+        title: 'Send notification', submitText: 'Send', size: 'lg',
+        fields: [
+          { name: 'target', label: 'Send to', type: 'select', required: true, options: opts, full: true },
+          { name: 'title', label: 'Title', required: true, full: true, attrs: 'maxlength="100"' },
+          { name: 'message', label: 'Message', type: 'textarea', required: true, full: true, rows: 4, attrs: 'maxlength="500"' }
+        ],
+        onOpen: function (m, form) {
+          var sel = $('[name=target]', form), holder = document.createElement('div');
+          holder.className = 'field full hidden'; holder.innerHTML = '<span class="lbl">Student</span><div id="sn-pick"></div>';
+          sel.closest('.field').after(holder);
+          ui.studentPicker($('#sn-pick', holder), function (s) { picked = s; });
+          sel.addEventListener('change', function () { holder.classList.toggle('hidden', sel.value !== '__STUDENT'); });
+        },
+        onSubmit: function (d) {
+          var target = d.target;
+          if (target === '__STUDENT') { if (!picked) return Promise.reject({ message: 'Please choose a student.' }); target = picked.studentId; }
+          return App.api('notifications.create', { target: target, title: d.title, message: d.message }).then(function () { ui.toast('Notification sent.', 'success'); done(); });
+        }
+      });
+    }).catch(App.fail);
+  }
+
+  /* ================================================================ TIMETABLE */
+  App.pages.timetable = {
+    render: function (root, params, token) {
+      var role = App.state.user.role;
+      root.innerHTML = ui.pageHead('Timetable', role === 'ADMIN' ? 'Weekly schedule of all active batches. Edit schedules from the Batches page.' : 'Your weekly class schedule.') + '<div id="tt">' + ui.skeleton(5) + '</div>';
+      return App.api('timetable.get').then(function (d) {
+        if (!App.stillHere(token)) return;
+        if (!d.items.length) { $('#tt').innerHTML = '<div class="card">' + ui.empty({ icon: 'clock', title: 'No classes scheduled', text: role === 'ADMIN' ? 'Add a schedule (days and time) to your batches.' : 'Your timetable will appear once batches have schedules.' }) + '</div>'; return; }
+        var order = [1, 2, 3, 4, 5, 6, 0];
+        $('#tt').innerHTML = '<div class="tt">' + order.map(function (day) {
+          var slots = d.items.filter(function (b) { return b.days.indexOf(day) >= 0; }).sort(function (a, b) { return a.startMin - b.startMin; });
+          return '<section class="tt-col' + (day === d.today ? ' today' : '') + '" aria-label="' + fmt.days[day] + '"><h4>' + fmt.days[day] + (day === d.today ? ' \u00B7 Today' : '') + '</h4>' +
+            (slots.length ? slots.map(function (b) {
+              return '<div class="tt-slot"><span class="muted">' + esc(b.time || '') + '</span><b>' + esc(b.subject) + '</b>' + (role === 'STUDENT' ? esc(b.teacherName) : esc(b.batch) + (role === 'ADMIN' ? ' \u00B7 ' + esc(b.teacherName) : '')) + '</div>';
+            }).join('') : '<div class="tt-slot muted">No classes</div>') + '</section>';
+        }).join('') + '</div>';
+      });
+    }
+  };
+
+  /* ================================================================= SETTINGS */
+  App.pages.settings = {
+    render: function (root, params, token) {
+      root.innerHTML = ui.pageHead('Settings', 'Institute details used across the portal and on receipts.') + '<div id="st">' + ui.skeleton(6) + '</div>';
+      return App.api('settings.get').then(function (s) {
+        if (!App.stillHere(token)) return;
+        $('#st').innerHTML = '<div class="stack-lg" style="max-width:860px">' +
+          '<form id="set-form" class="card card-pad stack-lg" novalidate>' +
+          '<section><h2 style="margin-bottom:12px">Institute</h2><div class="form-grid">' +
+          ui.field({ name: 'InstituteName', label: 'Institute name', required: true, value: s.InstituteName, full: true, attrs: 'maxlength="80"' }) +
+          ui.field({ name: 'Address', label: 'Address (printed on receipts)', value: s.Address, full: true, attrs: 'maxlength="200"' }) +
+          ui.field({ name: 'Phone', label: 'Phone', value: s.Phone, attrs: 'maxlength="40"' }) + ui.field({ name: 'Email', label: 'Email', type: 'email', value: s.Email, attrs: 'maxlength="80"' }) + '</div></section>' +
+          '<section><h2 style="margin-bottom:12px">Academics & receipts</h2><div class="form-grid">' +
+          ui.field({ name: 'AcademicYear', label: 'Academic year', required: true, value: s.AcademicYear, placeholder: '2026-27', help: 'Format: 2026-27' }) +
+          ui.field({ name: 'ReceiptPrefix', label: 'Receipt number prefix', required: true, value: s.ReceiptPrefix, help: 'Receipts look like ' + esc(s.ReceiptPrefix || 'SCC') + '-2627-000001', attrs: 'maxlength="8" style="text-transform:uppercase"' }) +
+          ui.field({ name: 'AllowedClasses', label: 'Classes offered', required: true, value: s.AllowedClasses, help: 'Comma separated, e.g. 8,9,10. Add 11,12 here to expand later.' }) +
+          ui.field({ name: 'LowAttendanceThreshold', label: 'Low attendance warning below (%)', type: 'number', min: 1, max: 100, value: s.LowAttendanceThreshold, required: true }) + '</div></section>' +
+          '<section><h2 style="margin-bottom:12px">Self-registration</h2><div class="form-grid">' +
+          ui.field({ name: 'StudentRegistration', label: 'Students can register', type: 'select', options: [{ value: 'ON', label: 'On (needs your approval)' }, { value: 'OFF', label: 'Off' }], value: s.StudentRegistration }) +
+          ui.field({ name: 'TeacherRegistration', label: 'Teachers can register', type: 'select', options: [{ value: 'ON', label: 'On (needs your approval)' }, { value: 'OFF', label: 'Off' }], value: s.TeacherRegistration }) + '</div></section>' +
+          '<div id="set-err"></div><div class="row"><button type="submit" class="btn" id="set-save">' + icon('check-circle') + ' Save settings</button></div></form>' +
+          '<section class="card card-pad"><h2 style="margin-bottom:6px">Institute logo</h2><p class="small muted" style="margin-bottom:14px">Shown on the login page, the menu and receipts. PNG or JPG, up to 300 KB (a small square image works best).</p>' +
+          '<div class="row"><div class="brand" style="padding:0"><div class="logo" style="width:72px;height:72px;border:1px solid var(--border);background:#fff">' + App.logoHtml({ name: s.InstituteName, logo: s.logo }) + '</div></div>' +
+          '<div class="grow"><input type="file" id="logo-file" accept="image/png,image/jpeg" aria-label="Choose logo file"></div><button type="button" class="btn secondary" id="logo-up">' + icon('upload') + ' Upload</button>' + (s.hasLogo ? '<button type="button" class="btn ghost" id="logo-rm">Remove</button>' : '') + '</div></section></div>';
+
+        $('#set-form').onsubmit = function (e) {
+          e.preventDefault(); $('#set-err').innerHTML = '';
+          var d = ui.formData(this);
+          ui.busy($('#set-save'), App.api('settings.save', d)).then(function () { ui.toast('Settings saved.', 'success'); return refreshInfo(); })
+            .catch(function (err) { $('#set-err').innerHTML = '<div class="alert error" role="alert">' + icon('alert') + '<div>' + esc(err.message) + '</div></div>'; });
+        };
+        $('#logo-up').onclick = function () {
+          var btn = this;
+          ui.readFile($('#logo-file'), 'logo').then(function (f) {
+            if (!f) { ui.toast('Please choose an image first.', 'error'); return; }
+            return ui.busy(btn, App.api('settings.uploadLogo', { file: f })).then(function () { ui.toast('Logo updated.', 'success'); return refreshInfo(); });
+          }).catch(App.fail);
+        };
+        var rm = $('#logo-rm');
+        if (rm) rm.onclick = function () { ui.busy(rm, App.api('settings.removeLogo')).then(function () { ui.toast('Logo removed.', 'success'); return refreshInfo(); }).catch(App.fail); };
+      });
+    }
+  };
+  function refreshInfo() {
+    return App.api('public.info').then(function (info) { App.state.info = info; App.state.cache = {}; App.renderShell(); App.go('settings'); });
+  }
+})();
+</script>

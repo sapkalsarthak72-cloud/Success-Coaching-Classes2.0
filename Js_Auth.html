@@ -1,0 +1,141 @@
+<script>
+/* Js_Auth — login, registration (student/teacher), logout, change password */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, esc = App.esc, icon = App.icon, ui = App.ui;
+
+  App.logoHtml = function (info) {
+    if (info && info.logo) return '<img src="' + esc(info.logo) + '" alt="">';
+    var p = String((info && info.name) || 'SC').replace(/[^A-Za-z0-9 ]/g, ' ').trim().split(/\s+/);
+    return esc((p[0].charAt(0) + (p.length > 1 ? p[p.length - 1].charAt(0) : '')).toUpperCase());
+  };
+
+  function heroHtml(info) {
+    return '<section class="auth-hero" aria-hidden="false"><div>' +
+      '<div class="logo">' + App.logoHtml(info) + '</div>' +
+      '<h1>' + esc(info.name || 'Success Coaching Classes') + '</h1>' +
+      '<p class="tagline">Attendance, assignments, study material, results and fees \u2014 everything for Classes ' + esc((info.classes || ['8', '9', '10']).join(', ').replace(/, (\d+)$/, ' & $1')) + ', in one place.</p>' +
+      '<ul>' + ['Track attendance and results', 'Download assignments and study material', 'View fees and payment receipts'].map(function (t) { return '<li>' + icon('check-circle') + '<span>' + t + '</span></li>'; }).join('') + '</ul></div>' +
+      '<div class="small" style="opacity:.8">' + esc(info.address || '') + (info.phone ? '<br>' + esc(info.phone) : '') + '</div></section>';
+  }
+  function mobileBrand(info) {
+    return '<div class="auth-mobile-brand"><div class="logo">' + App.logoHtml(info) + '</div><div><div class="bold" style="text-transform:uppercase">' + esc(info.name) + '</div><div class="small muted">Student &amp; Teacher Portal</div></div></div>';
+  }
+
+  App.renderAuth = function (mode, extra) {
+    var info = App.state.info || {}, root = $('#app');
+    App.state.user = null;
+    var form;
+    if (mode === 'register') form = registerForm(info, extra || 'student');
+    else if (mode === 'done') form = doneCard(extra);
+    else form = loginForm(info);
+    root.innerHTML = '<div class="auth">' + heroHtml(info) + '<main class="auth-form-wrap"><div class="auth-card">' + mobileBrand(info) + form + '</div></main></div>';
+    bind(mode, extra);
+  };
+
+  function loginForm(info) {
+    return '<h2>Welcome back</h2><p class="muted" style="margin-bottom:22px">Sign in to your account</p>' +
+      '<div id="auth-err"></div>' +
+      '<form id="login-form" class="stack" novalidate>' +
+      '<div class="field"><label for="lg-user">Username / Student ID / Teacher ID</label><input class="input" id="lg-user" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required></div>' +
+      '<div class="field"><label for="lg-pass">Password</label><div class="pw-wrap"><input class="input" id="lg-pass" name="password" type="password" autocomplete="current-password" required><button type="button" class="btn ghost sm icon-only" data-pw aria-label="Show password">' + icon('eye') + '</button></div></div>' +
+      '<button class="btn block" type="submit" id="lg-btn">Sign in</button></form>' +
+      ((info.studentRegistration || info.teacherRegistration) ? '<div class="center small muted" style="margin-top:22px">New here? ' +
+        (info.studentRegistration ? '<a href="#" data-reg="student">Register as a student</a>' : '') +
+        (info.studentRegistration && info.teacherRegistration ? ' \u00B7 ' : '') +
+        (info.teacherRegistration ? '<a href="#" data-reg="teacher">Register as a teacher</a>' : '') + '</div>' : '') +
+      '<p class="center xs muted" style="margin-top:26px">Forgot your password? Please ask the institute office to reset it.</p>';
+  }
+
+  function registerForm(info, role) {
+    var classes = info.classes || ['8', '9', '10'];
+    var roleSwitch = (info.studentRegistration && info.teacherRegistration) ?
+      '<div class="role-pick" role="group" aria-label="Register as" style="margin-bottom:16px"><button type="button" data-role="student" aria-pressed="' + (role === 'student') + '">Student</button><button type="button" data-role="teacher" aria-pressed="' + (role === 'teacher') + '">Teacher</button></div>' : '';
+    return '<h2>Create your account</h2><p class="muted" style="margin-bottom:16px">Your registration will be checked by the institute before you can log in.</p>' + roleSwitch +
+      '<div id="auth-err"></div><form id="reg-form" class="stack" data-role="' + role + '">' +
+      ui.field({ name: 'name', label: 'Full name', required: true, autocomplete: 'name', attrs: 'maxlength="80"' }) +
+      (role === 'student' ? ui.field({ name: 'class', label: 'Class', type: 'select', required: true, blank: 'Select class', options: classes.map(function (c) { return { value: c, label: 'Class ' + c }; }) })
+        : ui.field({ name: 'subject', label: 'Subject you teach', required: true, attrs: 'maxlength="60"' })) +
+      ui.field({ name: 'phone', label: 'Phone number', type: 'tel', required: true, autocomplete: 'tel', attrs: 'inputmode="numeric" maxlength="14"', help: '10-digit mobile number' }) +
+      ui.field({ name: 'password', label: 'Create a password', type: 'password', required: true, autocomplete: 'new-password', help: 'At least 8 characters with letters and numbers' }) +
+      ui.field({ name: 'password2', label: 'Confirm password', type: 'password', required: true, autocomplete: 'new-password' }) +
+      '<button class="btn block" type="submit" id="rg-btn">Submit registration</button></form>' +
+      '<div class="center small" style="margin-top:18px"><a href="#" data-login>\u2190 Back to sign in</a></div>';
+  }
+
+  function doneCard(r) {
+    return '<div class="center"><div class="empty" style="padding:10px 0 0"><div class="ico" style="background:var(--success-50);color:var(--success)">' + icon('check-circle') + '</div><h2>Registration received</h2></div>' +
+      '<p class="muted" style="margin:8px 0 18px">Please wait for the institute to approve your account. You can then sign in with:</p>' +
+      '<div class="receipt-box" style="text-align:left"><dl class="kv"><dt>Your ID / Username</dt><dd style="font-family:monospace;font-size:18px">' + esc(r.id) + '</dd><dt>Password</dt><dd>The one you just chose</dd></dl></div>' +
+      '<p class="small muted" style="margin:14px 0 20px">Write your ID down \u2014 you will need it to sign in.</p>' +
+      '<button class="btn block" data-login type="button">Back to sign in</button></div>';
+  }
+
+  function showErr(msg) {
+    var box = $('#auth-err');
+    if (box) box.innerHTML = '<div class="alert error" role="alert" style="margin-bottom:14px">' + icon('alert') + '<div>' + esc(msg) + '</div></div>';
+  }
+
+  function bind(mode, extra) {
+    var root = $('#app');
+    root.onclick = function (e) {
+      var r = e.target.closest('[data-reg]'), l = e.target.closest('[data-login]'), ro = e.target.closest('[data-role]');
+      if (r) { e.preventDefault(); App.renderAuth('register', r.dataset.reg); }
+      else if (l) { e.preventDefault(); App.renderAuth('login'); }
+      else if (ro && ro.tagName === 'BUTTON') { App.renderAuth('register', ro.dataset.role); }
+    };
+    var lf = $('#login-form');
+    if (lf) {
+      $('#lg-user').focus();
+      lf.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var u = $('#lg-user').value.trim(), p = $('#lg-pass').value;
+        if (!u || !p) { showErr('Please enter your username and password.'); return; }
+        $('#auth-err').innerHTML = '';
+        ui.busy($('#lg-btn'), App.api('auth.login', { username: u, password: p })).then(function (d) { App.startSession(d); })
+          .catch(function (err) { showErr(err.message); });
+      });
+    }
+    var rf = $('#reg-form');
+    if (rf) {
+      rf.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var d = ui.formData(rf), role = rf.dataset.role;
+        if (d.password !== d.password2) { showErr('The two passwords do not match.'); return; }
+        $('#auth-err').innerHTML = '';
+        delete d.password2;
+        ui.busy($('#rg-btn'), App.api(role === 'student' ? 'auth.registerStudent' : 'auth.registerTeacher', d))
+          .then(function (res) { App.renderAuth('done', res); })
+          .catch(function (err) { showErr(err.message); });
+      });
+    }
+  }
+
+  App.logout = function () {
+    var done = function () { App.store.remove('scc_token'); App.state.token = null; App.state.cache = {}; App.renderAuth('login'); };
+    App.api('auth.logout').then(done, done);
+  };
+
+  App.sessionExpired = function () {
+    if (!App.state.token) return;
+    App.store.remove('scc_token'); App.state.token = null; App.state.cache = {};
+    App.renderAuth('login');
+    ui.toast('Your session has expired. Please sign in again.', 'error');
+  };
+
+  App.changePasswordDialog = function () {
+    ui.formModal({
+      title: 'Change password', submitText: 'Change password', size: 'sm',
+      fields: [
+        { name: 'oldPassword', label: 'Current password', type: 'password', required: true, full: true, autocomplete: 'current-password' },
+        { name: 'newPassword', label: 'New password', type: 'password', required: true, full: true, autocomplete: 'new-password', help: 'At least 8 characters with letters and numbers' },
+        { name: 'confirm', label: 'Confirm new password', type: 'password', required: true, full: true, autocomplete: 'new-password' }
+      ],
+      onSubmit: function (d) {
+        if (d.newPassword !== d.confirm) return Promise.reject({ message: 'The new passwords do not match.' });
+        return App.api('auth.changePassword', { oldPassword: d.oldPassword, newPassword: d.newPassword }).then(function () { ui.toast('Password changed successfully.', 'success'); });
+      }
+    });
+  };
+})();
+</script>

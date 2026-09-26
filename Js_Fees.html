@@ -1,0 +1,241 @@
+<script>
+/* Js_Fees — admin: dues, payments, fee assignment, receipts. Student: own fees & receipts. */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, $$ = App.$$, esc = App.esc, icon = App.icon, ui = App.ui, fmt = App.fmt;
+  var MODES = [{ value: 'CASH', label: 'Cash' }, { value: 'UPI', label: 'UPI' }, { value: 'CARD', label: 'Card' }, { value: 'BANK_TRANSFER', label: 'Bank transfer' }, { value: 'CHEQUE', label: 'Cheque' }];
+  function modeLabel(m) { return String(m).replace('_', ' ').toLowerCase().replace(/^\w/, function (c) { return c.toUpperCase(); }); }
+  function who(name, id) { return '<div class="bold">' + esc(name) + '</div><div class="xs muted">' + esc(id) + '</div>'; }
+
+  App.pages.fees = {
+    render: function (root, params, token) {
+      if (App.state.user.role === 'STUDENT') return studentView(root, token);
+      root.innerHTML = ui.pageHead('Fees & payments', 'Track dues, record payments and issue receipts.',
+        '<button type="button" class="btn secondary" id="asg-fee">' + icon('plus') + ' Assign fees</button><button type="button" class="btn" id="rec-pay">' + icon('credit-card') + ' Record payment</button>') +
+        '<div class="tabs" role="tablist"><button type="button" class="tab" role="tab" data-tab="dues" aria-selected="true">Fees & dues</button><button type="button" class="tab" role="tab" data-tab="pays" aria-selected="false">Payment history</button></div><div id="fbody"></div>';
+      var view = null;
+      function show(tab) {
+        $$('.tab', root).forEach(function (t) { t.setAttribute('aria-selected', t.dataset.tab === tab); });
+        view = tab === 'dues' ? dues($('#fbody')) : payments($('#fbody'));
+      }
+      function refresh() { if (view) view.reload(); }
+      root.querySelector('.tabs').onclick = function (e) { var t = e.target.closest('[data-tab]'); if (t) show(t.dataset.tab); };
+      $('#asg-fee').onclick = function () { assignDialog(refresh); };
+      $('#rec-pay').onclick = function () { paymentDialog(null, refresh); };
+      return App.batches().then(function (b) {
+        if (!App.stillHere(token)) return;
+        App.state.cache.batches = b; show('dues');
+        if (params && params.student) studentDialog(params.student, refresh);
+      });
+    }
+  };
+
+  /* ------------------------------------------------------------ dues */
+  function dues(box) {
+    box.innerHTML = '<div id="dues-tot"></div><div id="dl"></div>';
+    var ftLoaded = false;
+    return ui.dataList({
+      root: $('#dl'), pageSize: 25, fetch: function (p) { return App.api('fees.outstanding', p); },
+      filters: [{ key: 'q', type: 'search', placeholder: 'Search student name or ID' },
+        { key: 'status', type: 'select', placeholder: 'Any status', value: 'DUE', options: [{ value: 'DUE', label: 'With balance due' }, { value: 'PENDING', label: 'Unpaid' }, { value: 'PARTIAL', label: 'Partly paid' }, { value: 'PAID', label: 'Fully paid' }, { value: 'ALL', label: 'All fees' }] },
+        { key: 'class', type: 'select', placeholder: 'All classes', options: (App.state.info.classes || []).map(function (c) { return { value: c, label: 'Class ' + c }; }) },
+        { key: 'batch', type: 'select', placeholder: 'All batches', options: App.batchOptions(App.state.cache.batches || []) },
+        { key: 'feeType', type: 'select', placeholder: 'All fee types', options: [] }],
+      empty: { icon: 'rupee', title: 'No fee records found', text: 'Use "Assign fees" to add fees to a student, batch or class.' },
+      onLoad: function (d, ctrl) {
+        var t = d.totals;
+        $('#dues-tot').innerHTML = '<div class="grid c3" style="margin-bottom:16px">' + ui.stat('rupee', fmt.money(t.remaining), 'Balance due (' + t.count + ' records)', 'error') + ui.stat('check-circle', fmt.money(t.paid), 'Collected', 'success') + ui.stat('file', fmt.money(t.finalFee), 'Total after discounts') + '</div>';
+        if (!ftLoaded && d.feeTypes.length) {
+          ftLoaded = true; var sel = $('[data-f=feeType]', ctrl.root);
+          if (sel) sel.innerHTML = ui.opts(d.feeTypes, '', 'All fee types');
+        }
+      },
+      columns: [
+        { label: 'Student', render: function (f) { return who(f.studentName, f.studentId); } }, { label: 'Class', render: function (f) { return esc(f.class); } },
+        { label: 'Fee', render: function (f) { return esc(f.feeType); } },
+        { label: 'Final fee', cls: 'num', render: function (f) { return fmt.money(f.finalFee); } }, { label: 'Paid', cls: 'num', render: function (f) { return fmt.money(f.paid); } },
+        { label: 'Balance', cls: 'num', render: function (f) { return '<b style="color:' + (f.remaining > 0 ? 'var(--error)' : 'var(--success)') + '">' + fmt.money(f.remaining) + '</b>'; } },
+        { label: 'Due date', render: function (f) { return f.dueDate ? fmt.date(f.dueDate) + (f.overdue ? ' ' + ui.badge('Overdue', 'error') : '') : '\u2014'; } },
+        { label: 'Status', render: function (f) { return ui.feeStatus(f.status); } },
+        { label: '', actions: true, render: function (f, i) { return (f.remaining > 0 ? ui.act('pay', i, 'credit-card', 'Pay', '') : '') + ui.act('open', i, 'eye', 'Details'); } }],
+      onAction: function (act, f, ctrl) {
+        if (act === 'pay') paymentDialog({ student: { studentId: f.studentId, name: f.studentName, class: f.class }, feeType: f.feeType }, ctrl.reload);
+        else studentDialog({ studentId: f.studentId, name: f.studentName, class: f.class }, ctrl.reload);
+      }
+    });
+  }
+
+  /* -------------------------------------------------------- payments */
+  function payments(box) {
+    box.innerHTML = '<div id="pay-tot"></div><div id="pl"></div>';
+    return ui.dataList({
+      root: $('#pl'), pageSize: 25, fetch: function (p) { return App.api('payments.list', p); },
+      filters: [{ key: 'q', type: 'search', placeholder: 'Search student, receipt no.' }, { key: 'mode', type: 'select', placeholder: 'All modes', options: MODES },
+        { key: 'from', type: 'date', placeholder: 'From' }, { key: 'to', type: 'date', placeholder: 'To' }],
+      empty: { icon: 'receipt', title: 'No payments found', text: 'Recorded payments and their receipts will be listed here.' },
+      onLoad: function (d) { $('#pay-tot').innerHTML = '<div class="alert info" style="margin-bottom:14px">' + icon('info') + '<div><b>' + fmt.money(d.totalAmount) + '</b> in ' + d.total + ' payment' + (d.total === 1 ? '' : 's') + ' for the current filters.</div></div>'; },
+      columns: [
+        { label: 'Date', render: function (p) { return fmt.date(p.date); } }, { label: 'Receipt', render: function (p) { return '<span class="tag">' + esc(p.receiptNumber) + '</span>'; } },
+        { label: 'Student', render: function (p) { return who(p.studentName, p.studentId); } }, { label: 'Fee', render: function (p) { return esc(p.feeType); } },
+        { label: 'Amount', cls: 'num', render: function (p) { return '<b>' + fmt.money(p.amount) + '</b>'; } }, { label: 'Mode', render: function (p) { return esc(modeLabel(p.mode)); } },
+        { label: 'Balance after', cls: 'num', render: function (p) { return fmt.money(p.remainingBalance); } },
+        { label: '', actions: true, render: function (p, i) { return ui.act('rc', i, 'download', 'Receipt'); } }],
+      onAction: function (act, p, c, btn) { App.download(btn, 'receipts.get', { paymentId: p.paymentId }); }
+    });
+  }
+
+  /* --------------------------------------------- student fee details */
+  function studentDialog(stu, onChange) {
+    var m = ui.modal({ title: 'Fees \u2014 ' + stu.name, size: 'lg', body: ui.skeleton(5), footer: '<button type="button" class="btn secondary" id="sd-add">' + icon('plus') + ' Assign another fee</button><button type="button" class="btn" data-close>Close</button>' });
+    function load() {
+      m.body.innerHTML = ui.skeleton(5);
+      App.api('fees.student', { studentId: stu.studentId }).then(function (d) {
+        var t = d.totals;
+        m.body.innerHTML = '<div class="row between" style="margin-bottom:14px"><div class="row nowrapflex">' + ui.avatar(d.student.name) + '<div>' + who(d.student.name, d.student.studentId + ' \u00B7 Class ' + d.student.class) + '</div></div>' +
+          '<div class="row"><span class="badge">Fees ' + fmt.money(t.finalFee) + '</span><span class="badge success">Paid ' + fmt.money(t.paid) + '</span><span class="badge ' + (t.remaining > 0 ? 'error' : 'success') + '">Balance ' + fmt.money(t.remaining) + '</span></div></div>' +
+          '<h3 style="margin-bottom:8px">Fee records</h3>' + (d.fees.length ? ui.table([
+            { label: 'Fee', render: function (f) { return '<b>' + esc(f.feeType) + '</b>' + (f.dueDate ? '<div class="xs muted">Due ' + fmt.date(f.dueDate) + (f.overdue ? ' \u00B7 overdue' : '') + '</div>' : ''); } },
+            { label: 'Total', cls: 'num', render: function (f) { return fmt.money(f.totalFee); } }, { label: 'Discount', cls: 'num', render: function (f) { return fmt.money(f.discount); } },
+            { label: 'Paid', cls: 'num', render: function (f) { return fmt.money(f.paid); } }, { label: 'Balance', cls: 'num', render: function (f) { return '<b>' + fmt.money(f.remaining) + '</b>'; } },
+            { label: 'Status', render: function (f) { return ui.feeStatus(f.status); } },
+            { label: '', actions: true, render: function (f, i) { return (f.remaining > 0 ? ui.act('pay', i, 'credit-card', 'Pay', '') : '') + ui.act('edit', i, 'edit', 'Edit') + (f.paid === 0 ? ui.act('del', i, 'trash', 'Delete') : ''); } }], d.fees) : '<p class="muted small">No fees assigned yet.</p>') +
+          '<h3 style="margin:18px 0 8px">Payment history</h3>' + (d.payments.length ? ui.table([
+            { label: 'Date', render: function (p) { return fmt.date(p.date); } }, { label: 'Receipt', render: function (p) { return '<span class="tag">' + esc(p.receiptNumber) + '</span>'; } },
+            { label: 'Fee', render: function (p) { return esc(p.feeType); } }, { label: 'Amount', cls: 'num', render: function (p) { return '<b>' + fmt.money(p.amount) + '</b>'; } },
+            { label: 'Mode', render: function (p) { return esc(modeLabel(p.mode)); } }, { label: '', actions: true, render: function (p, i) { return ui.act('rc', i, 'download', 'Receipt'); } }], d.payments) : '<p class="muted small">No payments yet.</p>');
+        var tables = m.body.querySelectorAll('.table-wrap');
+        var ft = d.fees.length ? tables[0] : null, pt = d.payments.length ? tables[d.fees.length ? 1 : 0] : null;
+        if (ft) ft.onclick = function (e) {
+          var a = e.target.closest('[data-act]'); if (!a) return; var f = d.fees[+a.dataset.i];
+          if (a.dataset.act === 'pay') paymentDialog({ student: stu, feeType: f.feeType }, function () { load(); onChange && onChange(); });
+          else if (a.dataset.act === 'edit') feeEditDialog(f, function () { load(); onChange && onChange(); });
+          else ui.confirm({ title: 'Delete fee', danger: true, confirmText: 'Delete', message: 'Delete "' + f.feeType + '" for this student? This cannot be undone.' }).then(function (ok) {
+            if (ok) App.api('fees.remove', { studentId: f.studentId, feeType: f.feeType }).then(function () { ui.toast('Fee deleted.', 'success'); load(); onChange && onChange(); }).catch(App.fail);
+          });
+        };
+        if (pt) pt.onclick = function (e) { var a = e.target.closest('[data-act]'); if (a) App.download(a, 'receipts.get', { paymentId: d.payments[+a.dataset.i].paymentId }); };
+      }).catch(function (e) { m.body.innerHTML = '<div class="alert error">' + esc(e.message) + '</div>'; });
+    }
+    $('#sd-add', m.el).onclick = function () { assignDialog(function () { load(); onChange && onChange(); }, stu); };
+    load();
+  }
+
+  function feeEditDialog(f, done) {
+    ui.formModal({
+      title: 'Edit fee \u2014 ' + f.feeType, submitText: 'Save changes', size: 'sm',
+      intro: f.paid > 0 ? 'Already paid: <b>' + fmt.money(f.paid) + '</b>. The final fee cannot go below this amount.' : '',
+      fields: [{ name: 'totalFee', label: 'Total fee (\u20B9)', type: 'number', required: true, min: 1, step: '0.01', value: f.totalFee, full: true },
+        { name: 'discount', label: 'Discount (\u20B9)', type: 'number', min: 0, step: '0.01', value: f.discount, full: true },
+        { name: 'dueDate', label: 'Due date (optional)', type: 'date', value: f.dueDate, full: true }],
+      onSubmit: function (d) { return App.api('fees.update', Object.assign({ studentId: f.studentId, feeType: f.feeType }, d)).then(function () { ui.toast('Fee updated.', 'success'); done(); }); }
+    });
+  }
+
+  /* ------------------------------------------------- assign fees dialog */
+  function assignDialog(done, stu) {
+    var month = new Date().toLocaleString('en', { month: 'short' }) + ' ' + new Date().getFullYear();
+    var ay = App.state.info.academicYear || '';
+    var picked = stu || null;
+    ui.formModal({
+      title: 'Assign fees', submitText: 'Assign fees', size: 'lg',
+      intro: 'Fees already assigned with the same fee type are skipped, so it is safe to run this again for a batch or class.',
+      fields: [
+        { name: 'ttype', label: 'Assign to', type: 'select', required: true, value: stu ? 'STUDENT' : 'CLASS', options: [{ value: 'CLASS', label: 'A whole class' }, { value: 'BATCH', label: 'A batch' }, { value: 'STUDENT', label: 'One student' }] },
+        { name: 'tval', label: 'Class', type: 'select', required: true, options: [] },
+        { name: 'feeType', label: 'Fee type', required: true, attrs: 'list="fee-types" maxlength="60" autocomplete="off"', placeholder: 'e.g. Course Fee ' + ay, help: 'Choose a suggestion or type your own name.' },
+        { name: 'totalFee', label: 'Total fee (\u20B9)', type: 'number', required: true, min: 1, step: '0.01' },
+        { name: 'discount', label: 'Discount (\u20B9)', type: 'number', min: 0, step: '0.01', value: 0 },
+        { name: 'dueDate', label: 'Due date (optional)', type: 'date' }
+      ],
+      after: '<datalist id="fee-types"><option value="Course Fee ' + esc(ay) + '"><option value="Monthly Fee - ' + esc(month) + '"><option value="Admission Fee"><option value="Exam Fee"></datalist>',
+      onOpen: function (m, form) {
+        var tt = $('[name=ttype]', form), tv = $('[name=tval]', form), holder = tv.closest('.field');
+        function swap() {
+          var t = tt.value;
+          if (t === 'STUDENT') {
+            holder.innerHTML = '<span class="lbl">Student</span><div id="as-pick"></div>';
+            ui.studentPicker($('#as-pick', holder), function (s) { picked = s; }, picked);
+          } else {
+            holder.innerHTML = '<label for="f-tval">' + (t === 'CLASS' ? 'Class' : 'Batch') + ' <span class="req">*</span></label><select class="select" id="f-tval" name="tval" required>' +
+              ui.opts(t === 'CLASS' ? (App.state.info.classes || []).map(function (c) { return { value: c, label: 'Class ' + c }; }) : App.batchOptions(App.state.cache.batches || [], true), '', 'Select\u2026') + '</select>';
+          }
+        }
+        tt.addEventListener('change', swap); swap();
+      },
+      onSubmit: function (d) {
+        var t = d.ttype, value = t === 'STUDENT' ? (picked && picked.studentId) : d.tval;
+        if (!value) return Promise.reject({ message: t === 'STUDENT' ? 'Please choose a student.' : 'Please make a selection to assign the fee to.' });
+        return App.api('fees.assign', { target: { type: t, value: value }, feeType: d.feeType, totalFee: d.totalFee, discount: d.discount || 0, dueDate: d.dueDate })
+          .then(function (r) { ui.toast(r.created + ' fee record' + (r.created === 1 ? '' : 's') + ' created' + (r.skipped ? ', ' + r.skipped + ' skipped (already assigned)' : '') + '.', 'success'); done(); });
+      }
+    });
+  }
+
+  /* ---------------------------------------------------- record payment */
+  function paymentDialog(pre, done) {
+    var chosen = pre ? pre.student : null, fees = [];
+    var m = ui.formModal({
+      title: 'Record payment', submitText: 'Record payment', size: 'lg',
+      fields: [
+        { name: 'feeType', label: 'Fee', type: 'select', required: true, blank: 'Choose a student first', options: [] },
+        { name: 'amount', label: 'Amount received (\u20B9)', type: 'number', required: true, min: 1, step: '0.01' },
+        { name: 'date', label: 'Payment date', type: 'date', required: true, value: fmt.today(), max: fmt.today() },
+        { name: 'paymentMode', label: 'Payment mode', type: 'select', required: true, options: MODES, value: 'CASH' },
+        { name: 'notes', label: 'Notes (optional)', full: true, attrs: 'maxlength="200"', placeholder: 'e.g. UPI reference, cheque number' }
+      ],
+      after: '<div id="pay-info" class="small muted" style="margin-top:10px"></div>',
+      onOpen: function (mm, form) {
+        form.insertAdjacentHTML('afterbegin', '<div class="field full"><span class="lbl">Student <span class="req">*</span></span><div id="pay-pick"></div></div>');
+        var sel = $('[name=feeType]', form), amt = $('[name=amount]', form);
+        function loadFees(first) {
+          if (!chosen) { sel.innerHTML = '<option value="">Choose a student first</option>'; return; }
+          sel.innerHTML = '<option value="">Loading\u2026</option>';
+          App.api('fees.student', { studentId: chosen.studentId }).then(function (d) {
+            fees = d.fees.filter(function (f) { return f.remaining > 0; });
+            sel.innerHTML = fees.length ? ui.opts(fees.map(function (f) { return { value: f.feeType, label: f.feeType + ' \u2014 balance ' + fmt.money(f.remaining) }; }), first && pre && pre.feeType ? pre.feeType : (fees.length === 1 ? fees[0].feeType : ''), 'Select fee') : '<option value="">No fees with a balance</option>';
+            sel.dispatchEvent(new Event('change'));
+          }).catch(function (e) { sel.innerHTML = '<option value="">Could not load fees</option>'; App.fail(e); });
+        }
+        sel.addEventListener('change', function () {
+          var f = fees.filter(function (x) { return x.feeType === sel.value; })[0], info = $('#pay-info', mm.el);
+          if (f) { amt.max = f.remaining; amt.value = f.remaining; info.innerHTML = 'Balance before this payment: <b>' + fmt.money(f.remaining) + '</b>. Partial payments (installments) are allowed.'; }
+          else info.innerHTML = '';
+        });
+        ui.studentPicker($('#pay-pick', form), function (s) { chosen = s; loadFees(false); }, chosen);
+        if (chosen) loadFees(true);
+      },
+      onSubmit: function (d) {
+        if (!chosen) return Promise.reject({ message: 'Please choose a student.' });
+        return App.api('payments.record', { studentId: chosen.studentId, feeType: d.feeType, amount: d.amount, date: d.date, paymentMode: d.paymentMode, notes: d.notes }).then(function (r) {
+          done && done();
+          var rm = ui.modal({ title: 'Payment recorded', size: 'sm', body: '<div class="center"><div class="empty" style="padding:0 0 8px"><div class="ico" style="background:var(--success-50);color:var(--success)">' + icon('check-circle') + '</div></div><h3>' + fmt.money(d.amount) + ' received</h3><p class="small muted" style="margin:4px 0 12px">Receipt no. <b>' + esc(r.receiptNumber) + '</b><br>Remaining balance: ' + fmt.money(r.remaining) + '</p>' + (r.receiptReady ? '' : '<p class="xs muted">The PDF is being prepared and will be created when you open it.</p>') + '</div>',
+            footer: '<button type="button" class="btn secondary" data-close>Close</button><button type="button" class="btn" id="rc-dl">' + icon('download') + ' Download receipt</button>' });
+          $('#rc-dl', rm.el).onclick = function () { App.download(this, 'receipts.get', { paymentId: r.paymentId }); };
+        });
+      }
+    });
+  }
+
+  /* ---------------------------------------------------------- student */
+  function studentView(root, token) {
+    root.innerHTML = ui.pageHead('My fees', 'Your fees, payments and receipts.') + '<div id="mf">' + ui.skeleton(5) + '</div>';
+    return App.api('fees.my').then(function (d) {
+      if (!App.stillHere(token)) return;
+      var t = d.totals;
+      $('#mf').innerHTML = '<div class="stack-lg"><div class="grid c3">' + ui.stat('file', fmt.money(t.finalFee), 'Total fees') + ui.stat('check-circle', fmt.money(t.paid), 'Paid', 'success') + ui.stat('rupee', fmt.money(t.remaining), 'Remaining', t.remaining > 0 ? 'error' : 'success') + '</div>' +
+        '<section><h2 style="margin-bottom:10px">Fee details</h2>' + (d.fees.length ? '<div class="grid c2">' + d.fees.map(function (f) {
+          var pct = f.finalFee ? Math.round(f.paid * 100 / f.finalFee) : 100;
+          return '<article class="card card-pad stack"><div class="row between"><h3>' + esc(f.feeType) + '</h3>' + ui.feeStatus(f.status) + '</div>' +
+            '<dl class="kv"><dt>Total fee</dt><dd>' + fmt.money(f.totalFee) + '</dd>' + (f.discount ? '<dt>Discount</dt><dd>\u2212 ' + fmt.money(f.discount) + '</dd>' : '') + '<dt>Payable</dt><dd>' + fmt.money(f.finalFee) + '</dd><dt>Paid</dt><dd>' + fmt.money(f.paid) + '</dd><dt>Remaining</dt><dd><b>' + fmt.money(f.remaining) + '</b></dd>' + (f.dueDate ? '<dt>Due date</dt><dd>' + fmt.date(f.dueDate) + (f.overdue ? ' ' + ui.badge('Overdue', 'error') : '') + '</dd>' : '') + '</dl>' + ui.progress(pct, pct >= 100 ? 'success' : '') + '</article>';
+        }).join('') + '</div>' : '<div class="card">' + ui.empty({ icon: 'rupee', title: 'No fees assigned yet', text: 'Fees added by the institute will show here.' }) + '</div>') + '</section>' +
+        '<section><h2 style="margin-bottom:10px">Payment history</h2>' + (d.payments.length ? ui.table([
+          { label: 'Date', render: function (p) { return fmt.date(p.date); } }, { label: 'Receipt no.', render: function (p) { return '<span class="tag">' + esc(p.receiptNumber) + '</span>'; } },
+          { label: 'Fee', render: function (p) { return esc(p.feeType); } }, { label: 'Amount', cls: 'num', render: function (p) { return '<b>' + fmt.money(p.amount) + '</b>'; } },
+          { label: 'Mode', render: function (p) { return esc(modeLabel(p.mode)); } }, { label: 'Balance after', cls: 'num', render: function (p) { return fmt.money(p.remainingBalance); } },
+          { label: '', actions: true, render: function (p, i) { return ui.act('rc', i, 'download', 'Receipt'); } }], d.payments) : '<div class="card">' + ui.empty({ icon: 'receipt', title: 'No payments yet' }) + '</div>') + '</section></div>';
+      var tbl = $('#mf .table-wrap');
+      if (tbl && d.payments.length) tbl.onclick = function (e) { var a = e.target.closest('[data-act]'); if (a) App.download(a, 'receipts.get', { paymentId: d.payments[+a.dataset.i].paymentId }); };
+    });
+  }
+})();
+</script>

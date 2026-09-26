@@ -1,0 +1,122 @@
+<script>
+/* Js_Results — enter marks (teacher/admin), browse results (admin), my results (student) */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, $$ = App.$$, esc = App.esc, icon = App.icon, ui = App.ui, fmt = App.fmt;
+  var SCALE = [[90, 'A+'], [80, 'A'], [70, 'B+'], [60, 'B'], [50, 'C'], [40, 'D'], [0, 'F']];
+  function gradeOf(p) { for (var i = 0; i < SCALE.length; i++) if (p >= SCALE[i][0]) return SCALE[i][1]; return 'F'; }
+
+  App.pages.results = {
+    render: function (root, params, token) {
+      var role = App.state.user.role;
+      if (role === 'STUDENT') return studentView(root, token);
+      var isAdmin = role === 'ADMIN';
+      root.innerHTML = ui.pageHead('Results', 'Enter exam marks. Percentage and grade are calculated automatically.') +
+        (isAdmin ? '<div class="tabs" role="tablist"><button type="button" class="tab" role="tab" data-tab="enter" aria-selected="true">Enter marks</button><button type="button" class="tab" role="tab" data-tab="all" aria-selected="false">All results</button></div>' : '') + '<div id="rbody">' + ui.skeleton(4) + '</div>';
+      return App.batches().then(function (all) {
+        if (!App.stillHere(token)) return;
+        var batches = all.filter(function (b) { return b.status === 'ACTIVE'; });
+        function show(tab) {
+          $$('.tab', root).forEach(function (t) { t.setAttribute('aria-selected', t.dataset.tab === tab); });
+          if (tab === 'all') browse($('#rbody'), all); else enter($('#rbody'), batches);
+        }
+        if (isAdmin) root.querySelector('.tabs').onclick = function (e) { var t = e.target.closest('[data-tab]'); if (t) show(t.dataset.tab); };
+        show('enter');
+      });
+    }
+  };
+
+  /* ------------------------------------------------------ enter marks */
+  function enter(box, batches) {
+    if (!batches.length) { box.innerHTML = '<div class="card">' + ui.empty({ icon: 'layers', title: 'No active batches', text: 'You need at least one active batch to enter results.' }) + '</div>'; return; }
+    box.innerHTML = '<div class="card card-pad"><div class="form-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">' +
+      ui.field({ id: 'rs-batch', name: 'rs-batch', label: 'Batch', type: 'select', options: App.batchOptions(batches) }) +
+      '<div class="field"><label for="rs-exam">Exam name</label><input class="input" id="rs-exam" maxlength="60" placeholder="e.g. Unit Test 1" list="rs-exams" autocomplete="off"><datalist id="rs-exams"></datalist></div>' +
+      ui.field({ id: 'rs-max', name: 'rs-max', label: 'Maximum marks', type: 'number', min: 1, step: '0.5', placeholder: 'e.g. 25' }) + '</div>' +
+      '<div class="row" style="margin-top:14px"><button type="button" class="btn" id="rs-open">' + icon('edit') + ' Open marks sheet</button></div><div id="rs-known" style="margin-top:12px"></div></div><div id="rs-sheet" style="margin-top:16px"></div>';
+    var known = [];
+    function loadExams() {
+      var b = $('#rs-batch').value;
+      App.api('results.exams', { batch: b }).then(function (d) {
+        known = d.items;
+        $('#rs-exams').innerHTML = d.items.map(function (x) { return '<option value="' + esc(x.exam) + '">'; }).join('');
+        $('#rs-known').innerHTML = d.items.length ? '<span class="small muted">Existing exams for this batch (click to edit): </span>' + d.items.map(function (x, i) { return '<button type="button" class="tag" style="border:0;cursor:pointer" data-k="' + i + '">' + esc(x.exam) + ' \u00B7 ' + x.students + ' entered</button>'; }).join(' ') : '';
+      }).catch(App.fail);
+    }
+    $('#rs-batch').onchange = function () { $('#rs-sheet').innerHTML = ''; loadExams(); };
+    $('#rs-known').onclick = function (e) { var k = e.target.closest('[data-k]'); if (k) { var x = known[+k.dataset.k]; $('#rs-exam').value = x.exam; $('#rs-max').value = x.maxMarks; openSheet(); } };
+    $('#rs-open').onclick = openSheet;
+
+    function openSheet() {
+      var b = $('#rs-batch').value, exam = $('#rs-exam').value.trim(), sh = $('#rs-sheet');
+      if (exam.length < 2) { ui.toast('Please type the exam name first.', 'error'); $('#rs-exam').focus(); return; }
+      sh.innerHTML = '<div class="card card-pad">' + ui.skeleton(6) + '</div>';
+      App.api('results.sheet', { batch: b, exam: exam }).then(function (d) {
+        if (d.maxMarks && !$('#rs-max').value) $('#rs-max').value = d.maxMarks;
+        if (!d.students.length) { sh.innerHTML = '<div class="card">' + ui.empty({ icon: 'users', title: 'No students in this batch' }) + '</div>'; return; }
+        sh.innerHTML = '<section class="card" aria-label="Marks sheet"><div class="card-head"><div><h3>' + esc(d.batch) + ' \u00B7 ' + esc(d.subject) + '</h3><div class="xs muted">' + esc(exam) + (d.exists ? ' \u2014 editing saved marks' : ' \u2014 new exam') + '</div></div></div><div>' +
+          d.students.map(function (s, i) {
+            return '<div class="att-row" data-i="' + i + '"><div class="who"><div class="bold">' + esc(s.name) + '</div><div class="xs muted">' + esc(s.studentId) + '</div></div>' +
+              '<div><input class="input" style="width:110px" type="number" min="0" step="0.5" inputmode="decimal" data-marks placeholder="Marks" aria-label="Marks for ' + esc(s.name) + '" value="' + esc(s.marks) + '"></div>' +
+              '<div style="min-width:96px" data-calc></div><div class="grow" style="min-width:140px"><input class="input" data-rem maxlength="80" placeholder="Remarks (optional)" aria-label="Remarks for ' + esc(s.name) + '" value="' + esc(s.remarks) + '"></div></div>';
+          }).join('') + '</div><div class="sticky-bar"><span class="small muted" id="rs-note">Leave marks empty for absent students.</span><button type="button" class="btn" id="rs-save">' + icon('check-circle') + ' Save results</button></div></section>';
+        function calc() {
+          var max = Number($('#rs-max').value);
+          $$('.att-row', sh).forEach(function (row) {
+            var v = $('[data-marks]', row).value, c = $('[data-calc]', row);
+            if (v === '' || !max) { c.innerHTML = ''; return; }
+            var p = Math.round(Number(v) * 10000 / max) / 100;
+            c.innerHTML = Number(v) > max ? '<span class="badge error">Above max</span>' : '<b>' + p + '%</b> ' + ui.grade(gradeOf(p));
+          });
+        }
+        sh.addEventListener('input', calc); $('#rs-max').oninput = calc; calc();
+        $('#rs-save').onclick = function () {
+          var max = $('#rs-max').value;
+          if (!max || Number(max) <= 0) { ui.toast('Please enter the maximum marks.', 'error'); $('#rs-max').focus(); return; }
+          var entries = $$('.att-row', sh).map(function (row) { return { studentId: d.students[+row.dataset.i].studentId, marks: $('[data-marks]', row).value, remarks: $('[data-rem]', row).value }; });
+          ui.busy($('#rs-save'), App.api('results.save', { batch: b, exam: exam, maxMarks: max, entries: entries })).then(function (r) {
+            ui.toast('Results saved for ' + r.saved + ' student' + (r.saved === 1 ? '' : 's') + '.', 'success'); loadExams();
+          }).catch(App.fail);
+        };
+      }).catch(function (e) { sh.innerHTML = '<div class="card">' + ui.empty({ icon: 'alert', title: 'Could not open the marks sheet', text: e.message }) + '</div>'; App.fail(e); });
+    }
+    loadExams();
+  }
+
+  /* ---------------------------------------------------- admin browser */
+  function browse(box, all) {
+    box.innerHTML = '<div id="rl"></div>';
+    ui.dataList({
+      root: $('#rl'), pageSize: 25, fetch: function (p) { return App.api('results.list', p); },
+      filters: [{ key: 'q', type: 'search', placeholder: 'Search student name or ID' }, { key: 'exam', type: 'search', placeholder: 'Exam name' }, { key: 'batch', type: 'select', placeholder: 'All batches', options: App.batchOptions(all) }],
+      empty: { icon: 'award', title: 'No results found', text: 'Teachers enter results from the "Enter marks" tab.' },
+      columns: [
+        { label: 'Student', render: function (r) { return '<b>' + esc(r.studentName) + '</b><div class="xs muted">' + esc(r.studentId) + '</div>'; } },
+        { label: 'Exam', render: function (r) { return esc(r.exam); } }, { label: 'Batch', render: function (r) { return '<span class="tag">' + esc(r.batch) + '</span>'; } },
+        { label: 'Subject', render: function (r) { return esc(r.subject); } },
+        { label: 'Marks', cls: 'num', render: function (r) { return r.marks + ' / ' + r.maxMarks; } },
+        { label: '%', cls: 'num', render: function (r) { return r.percentage + '%'; } }, { label: 'Grade', render: function (r) { return ui.grade(r.grade); } },
+        { label: '', actions: true, render: function (r, i) { return ui.act('del', i, 'trash', 'Delete'); } }],
+      onAction: function (act, r, c) {
+        ui.confirm({ title: 'Delete result', danger: true, confirmText: 'Delete', message: 'Delete ' + r.studentName + '\u2019s result for "' + r.exam + '" (' + r.subject + ')?' }).then(function (ok) {
+          if (ok) App.api('results.remove', { batch: r.batch, exam: r.exam, studentId: r.studentId }).then(function () { ui.toast('Result deleted.', 'success'); c.reload(); }).catch(App.fail);
+        });
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------ student */
+  function studentView(root, token) {
+    root.innerHTML = ui.pageHead('My results', 'Your exam results and grades.') + '<div id="mr">' + ui.skeleton(5) + '</div>';
+    return App.api('results.my').then(function (d) {
+      if (!App.stillHere(token)) return;
+      $('#mr').innerHTML = d.items.length ? '<div class="stack-lg">' + d.items.map(function (x) {
+        return '<section class="card" aria-label="' + esc(x.exam) + '"><div class="card-head"><div><h3>' + esc(x.exam) + '</h3><div class="xs muted">' + fmt.date(x.date) + '</div></div>' +
+          '<div class="row"><div class="right"><div class="bold">' + fmt.num(x.total) + ' / ' + fmt.num(x.maxTotal) + '</div><div class="xs muted">Total marks</div></div><div class="right"><div class="bold">' + x.percentage + '%</div><div class="xs muted">Percentage</div></div>' + ui.grade(x.grade) + '</div></div>' +
+          '<div style="padding:0">' + ui.table([{ label: 'Subject', render: function (s) { return '<b>' + esc(s.subject) + '</b>'; } }, { label: 'Marks', cls: 'num', render: function (s) { return s.marks + ' / ' + s.maxMarks; } },
+            { label: '%', cls: 'num', render: function (s) { return s.percentage + '%'; } }, { label: 'Grade', render: function (s) { return ui.grade(s.grade); } }, { label: 'Remarks', render: function (s) { return esc(s.remarks || '\u2014'); } }], x.subjects).replace('class="table-wrap"', 'class="table-wrap" style="border:0;box-shadow:none;border-radius:0"') + '</div></section>';
+      }).join('') + '</div>' : '<div class="card">' + ui.empty({ icon: 'award', title: 'No results yet', text: 'Your results will appear here once your teachers publish them.' }) + '</div>';
+    });
+  }
+})();
+</script>

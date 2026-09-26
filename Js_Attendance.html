@@ -1,0 +1,170 @@
+<script>
+/* Js_Attendance — take/edit attendance, reports, overview (admin/teacher) + own attendance (student) */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, $$ = App.$$, esc = App.esc, icon = App.icon, ui = App.ui, fmt = App.fmt;
+
+  function tabsHtml(defs, active) {
+    return '<div class="tabs" role="tablist">' + defs.map(function (t) { return '<button type="button" class="tab" role="tab" data-tab="' + t[0] + '" aria-selected="' + (t[0] === active) + '">' + esc(t[1]) + '</button>'; }).join('') + '</div>';
+  }
+  function shiftMonth(ym, n) {
+    var y = +ym.substr(0, 4), m = +ym.substr(5, 2) - 1 + n;
+    y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+    return y + '-' + String(m + 1).padStart(2, '0');
+  }
+
+  App.pages.attendance = {
+    render: function (root, params, token) {
+      if (App.state.user.role === 'STUDENT') return studentView(root, token);
+      var isAdmin = App.state.user.role === 'ADMIN';
+      var defs = [['mark', 'Take attendance'], ['report', 'Reports & history']].concat(isAdmin ? [['overview', 'Daily overview']] : []);
+      var active = params && params.tab ? params.tab : (params && params.overview ? 'overview' : 'mark');
+      root.innerHTML = ui.pageHead('Attendance', 'Mark attendance, review reports and correct mistakes.') + tabsHtml(defs, active) + '<div id="tab-body">' + ui.skeleton(4) + '</div>';
+      return App.batches().then(function (all) {
+        if (!App.stillHere(token)) return;
+        var batches = all.filter(function (b) { return b.status === 'ACTIVE'; });
+        var body = $('#tab-body');
+        function show(tab) {
+          $$('.tab', root).forEach(function (t) { t.setAttribute('aria-selected', t.dataset.tab === tab); });
+          if (tab === 'mark') markTab(body, batches, params || {});
+          else if (tab === 'report') reportTab(body, batches, function (b, d) { show('mark'); markTab(body, batches, { batch: b, date: d }); });
+          else overviewTab(body, function (b, d) { show('mark'); markTab(body, batches, { batch: b, date: d }); });
+        }
+        root.querySelector('.tabs').onclick = function (e) { var t = e.target.closest('[data-tab]'); if (t) { params = {}; show(t.dataset.tab); } };
+        show(active);
+      });
+    }
+  };
+
+  /* ----------------------------------------------------------- mark */
+  function markTab(box, batches, pre) {
+    if (!batches.length) { box.innerHTML = '<div class="card">' + ui.empty({ icon: 'layers', title: 'No active batches', text: 'Batches must exist before attendance can be taken.' }) + '</div>'; return; }
+    var today = fmt.today();
+    box.innerHTML = '<div class="card card-pad"><div class="form-grid">' +
+      ui.field({ id: 'a-batch', name: 'a-batch', label: 'Batch', type: 'select', options: App.batchOptions(batches), value: pre.batch || batches[0].batch }) +
+      ui.field({ id: 'a-date', name: 'a-date', label: 'Date', type: 'date', value: pre.date || today, max: today }) +
+      '</div></div><div id="sheet" style="margin-top:16px"></div>';
+    var sheetBox = $('#sheet'), cur = null;
+
+    function load() {
+      var b = $('#a-batch').value, d = $('#a-date').value;
+      if (!d) { sheetBox.innerHTML = '<div class="alert info">' + icon('info') + '<div>Please choose a date.</div></div>'; return; }
+      if (d > today) { sheetBox.innerHTML = '<div class="alert warning">' + icon('alert') + '<div>Attendance cannot be marked for a future date.</div></div>'; return; }
+      sheetBox.innerHTML = '<div class="card card-pad">' + ui.skeleton(6) + '</div>';
+      App.api('attendance.sheet', { batch: b, date: d }).then(function (s) { cur = s; paint(); }).catch(function (e) {
+        sheetBox.innerHTML = '<div class="card">' + ui.empty({ icon: 'alert', title: 'Could not open the attendance sheet', text: e.message }) + '</div>'; App.fail(e);
+      });
+    }
+    function counts() { var a = cur.students.filter(function (s) { return s.status === 'ABSENT'; }).length; return { a: a, p: cur.students.length - a }; }
+    function rowHtml(s, i) {
+      var ab = s.status === 'ABSENT';
+      return '<div class="att-row' + (ab ? ' absent' : '') + '" data-i="' + i + '"><div class="who"><div class="bold">' + esc(s.name) + '</div><div class="xs muted">' + esc(s.studentId) + '</div></div>' +
+        '<div class="seg" role="group" aria-label="Attendance for ' + esc(s.name) + '"><button type="button" class="p" data-set="PRESENT" aria-pressed="' + !ab + '">Present</button><button type="button" class="a" data-set="ABSENT" aria-pressed="' + ab + '">Absent</button></div>' +
+        '<div class="att-note' + (ab ? '' : ' hidden') + '"><input class="input" data-remark placeholder="Reason (optional)" maxlength="60" aria-label="Reason for ' + esc(s.name) + '" value="' + esc(s.remark) + '"></div></div>';
+    }
+    function paint() {
+      if (!cur.students.length) { sheetBox.innerHTML = '<div class="card">' + ui.empty({ icon: 'users', title: 'No students in this batch', text: 'Students must be added to the batch before attendance can be taken.' }) + '</div>'; return; }
+      var c = counts();
+      sheetBox.innerHTML = (cur.exists ? '<div class="alert info" style="margin-bottom:12px">' + icon('info') + '<div>Attendance for this date was already saved' + (cur.updatedAt ? ' (' + esc(fmt.dateTime(cur.updatedAt)) + ')' : '') + '. You are editing it.</div></div>' : '') +
+        '<section class="card" aria-label="Attendance sheet"><div class="card-head"><div><h3>' + esc(cur.batch) + ' \u00B7 ' + esc(cur.subject) + '</h3><div class="xs muted">' + esc(fmt.date(cur.date)) + ' \u00B7 ' + cur.students.length + ' students</div></div>' +
+        '<div class="row"><button type="button" class="btn secondary sm" id="all-p">' + icon('check') + ' Mark all present</button></div></div>' +
+        '<div>' + cur.students.map(rowHtml).join('') + '</div>' +
+        '<div class="sticky-bar"><div class="row"><span class="badge success" id="cnt-p">' + c.p + ' present</span><span class="badge error" id="cnt-a">' + c.a + ' absent</span></div><button type="button" class="btn" id="save-att">' + icon('check-circle') + ' Save attendance</button></div></section>';
+      $('#save-att').onclick = save; $('#all-p').onclick = function () { cur.students.forEach(function (s) { s.status = 'PRESENT'; s.remark = ''; }); paint(); };
+      sheetBox.querySelector('section').addEventListener('click', function (e) {
+        var b = e.target.closest('[data-set]'); if (!b) return;
+        var row = b.closest('.att-row'), s = cur.students[+row.dataset.i];
+        s.status = b.dataset.set;
+        var tmp = document.createElement('div'); tmp.innerHTML = rowHtml(s, +row.dataset.i);
+        row.replaceWith(tmp.firstChild);
+        var cc = counts(); $('#cnt-p').textContent = cc.p + ' present'; $('#cnt-a').textContent = cc.a + ' absent';
+        if (s.status === 'ABSENT') { var inp = $('.att-row[data-i="' + row.dataset.i + '"] [data-remark]'); if (inp) inp.focus(); }
+      });
+      sheetBox.querySelector('section').addEventListener('input', function (e) { if (e.target.dataset.remark !== undefined) cur.students[+e.target.closest('.att-row').dataset.i].remark = e.target.value; });
+    }
+    function save() {
+      var records = cur.students.map(function (s) { return { studentId: s.studentId, status: s.status, remark: s.remark }; });
+      ui.busy($('#save-att'), App.api('attendance.save', { batch: cur.batch, date: cur.date, records: records })).then(function (r) {
+        ui.toast('Attendance saved \u2014 ' + r.present + ' present, ' + r.absent + ' absent.', 'success'); cur.exists = true; cur.updatedAt = fmt.today() + ' ' + new Date().toTimeString().substr(0, 5); paint();
+      }).catch(App.fail);
+    }
+    $('#a-batch').onchange = load; $('#a-date').onchange = load;
+    load();
+  }
+
+  /* --------------------------------------------------------- report */
+  function reportTab(box, batches, openDay) {
+    if (!batches.length) { box.innerHTML = '<div class="card">' + ui.empty({ icon: 'layers', title: 'No active batches' }) + '</div>'; return; }
+    var today = fmt.today();
+    box.innerHTML = '<div class="card card-pad"><div class="form-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">' +
+      ui.field({ id: 'r-batch', name: 'r-batch', label: 'Batch', type: 'select', options: App.batchOptions(batches) }) +
+      ui.field({ id: 'r-from', name: 'r-from', label: 'From', type: 'date', value: today.substr(0, 8) + '01', max: today }) +
+      ui.field({ id: 'r-to', name: 'r-to', label: 'To', type: 'date', value: today, max: today }) + '</div></div><div id="rep" style="margin-top:16px"></div>';
+    var rep = $('#rep');
+    function load() {
+      var b = $('#r-batch').value, f = $('#r-from').value, t = $('#r-to').value;
+      rep.innerHTML = '<div class="card card-pad">' + ui.skeleton(5) + '</div>';
+      Promise.all([App.api('attendance.report', { batch: b, from: f, to: t }), App.api('attendance.history', { batch: b, month: t.substr(0, 7) })]).then(function (r) {
+        var d = r[0], h = r[1];
+        rep.innerHTML = '<div class="stack-lg"><div><div class="row between" style="margin-bottom:10px"><h2>' + esc(d.batch) + ' \u00B7 ' + esc(d.subject) + '</h2><span class="muted small">' + d.sessions + ' session' + (d.sessions === 1 ? '' : 's') + ' recorded</span></div>' +
+          (d.students.length ? ui.table([
+            { label: 'Student', render: function (s) { return '<b>' + esc(s.name) + '</b><div class="xs muted">' + esc(s.studentId) + '</div>'; } },
+            { label: 'Present', cls: 'num', render: function (s) { return s.present; } }, { label: 'Absent', cls: 'num', render: function (s) { return s.absent; } },
+            { label: 'Attendance', render: function (s) { return s.total ? '<div style="min-width:120px"><div class="row between xs"><b>' + s.percent + '%</b>' + (s.low ? ui.badge('Low', 'warning') : '') + '</div>' + ui.progress(s.percent, s.low ? 'warning' : 'success') + '</div>' : '<span class="muted small">No data</span>'; } }], d.students) : '<div class="card">' + ui.empty({ icon: 'users', title: 'No students in this batch' }) + '</div>') + '</div>' +
+          '<div><h3 style="margin-bottom:10px">Days recorded in ' + esc(fmt.monthLabel(h.month)) + '</h3>' + (h.items.length ? '<div class="row">' + h.items.map(function (x) {
+            return '<button type="button" class="day-chip" data-day="' + x.date + '" title="Open and edit this day"><b>' + esc(fmt.date(x.date).split(' ').slice(0, 2).join(' ')) + '</b><span style="color:var(--success)">' + x.present + ' P</span><span style="color:var(--error)">' + x.absent + ' A</span></button>'; }).join('') + '</div>' : '<p class="muted small">No attendance recorded in this month.</p>') + '</div></div>';
+        rep.onclick = function (e) { var c = e.target.closest('[data-day]'); if (c) openDay(b, c.dataset.day); };
+      }).catch(function (e) { rep.innerHTML = '<div class="card">' + ui.empty({ icon: 'alert', title: 'Could not load the report', text: e.message }) + '</div>'; App.fail(e); });
+    }
+    ['r-batch', 'r-from', 'r-to'].forEach(function (id) { $('#' + id).onchange = load; });
+    load();
+  }
+
+  /* ------------------------------------------------------- overview */
+  function overviewTab(box, open) {
+    var today = fmt.today();
+    box.innerHTML = '<div class="card card-pad" style="max-width:320px">' + ui.field({ id: 'o-date', name: 'o-date', label: 'Date', type: 'date', value: today, max: today }) + '</div><div id="ov" style="margin-top:16px"></div>';
+    function load() {
+      var d = $('#o-date').value, ov = $('#ov');
+      ov.innerHTML = '<div class="card card-pad">' + ui.skeleton(5) + '</div>';
+      App.api('attendance.overview', { date: d }).then(function (r) {
+        var t = r.totals;
+        ov.innerHTML = '<div class="grid c4" style="margin-bottom:16px">' + ui.stat('layers', t.scheduled, 'Batches scheduled') + ui.stat('check-circle', t.marked, 'Batches marked', 'success') + ui.stat('users', t.present, 'Present', 'secondary') + ui.stat('alert', t.absent, 'Absent', 'error') + '</div>' +
+          (r.items.length ? ui.table([
+            { label: 'Batch', render: function (b) { return '<b>' + esc(b.batch) + '</b> <span class="muted">\u00B7 ' + esc(b.subject) + '</span>'; } },
+            { label: 'Teacher', render: function (b) { return esc(b.teacherName); } }, { label: 'Time', render: function (b) { return esc(b.time || '\u2014'); } },
+            { label: 'Scheduled', render: function (b) { return b.scheduled ? 'Yes' : '<span class="muted">No</span>'; } },
+            { label: 'Status', render: function (b) { return b.marked ? ui.badge(b.present + ' present / ' + b.absent + ' absent', 'success') : (b.scheduled ? ui.badge('Not marked', 'warning') : '<span class="muted">\u2014</span>'); } },
+            { label: '', actions: true, render: function (b, i) { return ui.act('open', i, 'edit', b.marked ? 'Edit' : 'Mark'); } }], r.items) : '<div class="card">' + ui.empty({ icon: 'layers', title: 'No active batches' }) + '</div>');
+        ov.onclick = function (e) { var a = e.target.closest('[data-act]'); if (a) open(r.items[+a.dataset.i].batch, d); };
+      }).catch(function (e) { ov.innerHTML = '<div class="card">' + ui.empty({ icon: 'alert', title: 'Could not load the overview', text: e.message }) + '</div>'; App.fail(e); });
+    }
+    $('#o-date').onchange = load; load();
+  }
+
+  /* -------------------------------------------------------- student */
+  function studentView(root, token) {
+    var month = fmt.month();
+    root.innerHTML = ui.pageHead('My attendance', 'Your attendance across all subjects.') + '<div id="att">' + ui.skeleton(5) + '</div>';
+    function load() {
+      return App.api('attendance.my', { month: month }).then(function (d) {
+        if (!App.stillHere(token)) return;
+        var o = d.overall, low = o.total > 0 && o.percent < d.threshold;
+        $('#att').innerHTML = '<div class="stack-lg">' +
+          (low ? '<div class="alert warning">' + icon('alert') + '<div><b>Your attendance is below ' + d.threshold + '%.</b> Please try to attend more classes.</div></div>' : '') +
+          '<div class="grid c3"><section class="card card-pad row nowrapflex">' + ui.donut(o.percent, 'overall', d.threshold) + '<div><h3>Overall</h3><p class="small muted">' + o.present + ' present<br>' + o.absent + ' absent<br>' + o.total + ' classes recorded</p></div></section>' +
+          (d.byBatch.length ? d.byBatch.map(function (b) {
+            var lo = b.total > 0 && b.percent < d.threshold;
+            return '<section class="card card-pad stack"><div class="row between"><h3>' + esc(b.subject || b.batch) + '</h3>' + (lo ? ui.badge('Low', 'warning') : ui.badge('Good', 'success')) + '</div><div class="stat" style="padding:0"><div><div class="val">' + b.percent + '%</div><div class="lbl">' + b.present + ' of ' + b.total + ' classes</div></div></div>' + ui.progress(b.percent, lo ? 'warning' : 'success') + '</section>';
+          }).join('') : '<div class="card grow" style="grid-column:span 2">' + ui.empty({ icon: 'clipboard', title: 'No attendance recorded yet', text: 'It will appear here once your teacher marks attendance.' }) + '</div>') + '</div>' +
+          '<section><div class="row between" style="margin-bottom:10px"><h2>Daily record</h2><div class="row nowrapflex"><button type="button" class="btn secondary sm icon-only" id="pm" aria-label="Previous month">' + icon('chevron-left') + '</button><b style="min-width:110px;text-align:center">' + esc(fmt.monthLabel(month)) + '</b><button type="button" class="btn secondary sm icon-only" id="nm" aria-label="Next month"' + (month >= fmt.month() ? ' disabled' : '') + '>' + icon('chevron-right') + '</button></div></div>' +
+          (d.days.length ? ui.table([{ label: 'Date', render: function (x) { return esc(fmt.date(x.date)); } }, { label: 'Subject', render: function (x) { return esc(x.subject || x.batch); } },
+            { label: 'Status', render: function (x) { return ui.status(x.status); } }, { label: 'Remark', render: function (x) { return esc(x.remark || '\u2014'); } }], d.days) : '<div class="card">' + ui.empty({ icon: 'calendar', title: 'No classes recorded in ' + fmt.monthLabel(month) }) + '</div>') + '</section></div>';
+        $('#pm').onclick = function () { month = shiftMonth(month, -1); $('#att').innerHTML = ui.skeleton(5); load(); };
+        $('#nm').onclick = function () { month = shiftMonth(month, 1); $('#att').innerHTML = ui.skeleton(5); load(); };
+      });
+    }
+    return load();
+  }
+})();
+</script>

@@ -1,0 +1,134 @@
+<script>
+/* Js_Dashboard — Admin / Teacher / Student dashboards + shared list-item renderers */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, esc = App.esc, icon = App.icon, ui = App.ui, fmt = App.fmt;
+  var parts = App.parts = {};
+
+  function greeting() { var h = new Date().getHours(); return h < 12 ? 'Good morning' : (h < 17 ? 'Good afternoon' : 'Good evening'); }
+  function goAttr(route, param) { return 'data-go="' + route + '"' + (param ? ' data-param="' + esc(JSON.stringify(param)) + '"' : ''); }
+  function panel(title, route, body, linkLabel) {
+    return '<section class="card" aria-label="' + esc(title) + '"><div class="card-head"><h3>' + esc(title) + '</h3>' +
+      (route ? '<a href="#" class="small bold" data-go="' + route + '">' + esc(linkLabel || 'View all') + ' ' + icon('chevron-right') + '</a>' : '') + '</div>' + body + '</section>';
+  }
+  function list(items, render, empty) {
+    if (!items || !items.length) return '<div class="empty" style="padding:28px 16px"><p class="small">' + esc(empty || 'Nothing to show yet.') + '</p></div>';
+    return '<ul class="list">' + items.map(render).join('') + '</ul>';
+  }
+  App.panel = panel; App.listOf = list;
+
+  /* ----------------------------------------------------- shared items */
+  parts.assignmentItem = function (a, opts) {
+    var tone = a.overdue ? 'error' : (a.daysLeft !== null && a.daysLeft <= 2 ? 'warning' : 'info');
+    return '<li class="list-item"><div class="avatar" style="background:var(--warning-50);color:var(--warning)">' + icon('file') + '</div><div class="grow"><div class="bold">' + esc(a.title) + '</div>' +
+      '<div class="xs muted">' + esc(a.subject) + (opts && opts.showBatch ? ' \u00B7 ' + esc(a.batch) : '') + ' \u00B7 Due ' + fmt.date(a.dueDate) + '</div></div>' + ui.badge(fmt.due(a), tone) + '</li>';
+  };
+  parts.materialItem = function (m) {
+    return '<li class="list-item"><div class="avatar" style="background:var(--secondary-50);color:var(--secondary)">' + icon('book') + '</div><div class="grow"><div class="bold">' + esc(m.title) + '</div>' +
+      '<div class="xs muted">' + esc(m.subject) + ' \u00B7 ' + esc(m.batch) + ' \u00B7 ' + fmt.date(m.date) + '</div></div></li>';
+  };
+  parts.eventItem = function (e) {
+    var d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(e.date) || [];
+    var tone = { Holiday: 'success', Test: 'error', 'Parent Meeting': 'warning', 'Special Class': 'info' }[e.eventType] || 'primary';
+    return '<li class="list-item"><div class="avatar" style="border-radius:12px;flex-direction:column;line-height:1.1;font-size:11px"><b style="font-size:15px">' + (d[3] ? +d[3] : '') + '</b>' + esc(fmt.date(e.date).split(' ')[1] || '') + '</div>' +
+      '<div class="grow"><div class="bold">' + esc(e.title) + '</div><div class="xs muted">' + (e.time ? esc(e.time) + ' \u00B7 ' : '') + esc(e.target === 'ALL' ? 'Everyone' : e.target.replace('CLASS_', 'Class ')) + '</div></div>' + ui.badge(e.eventType, tone) + '</li>';
+  };
+  parts.noteItem = function (n) {
+    return '<li class="list-item"><div class="avatar" style="' + (n.unread ? '' : 'background:#eef2f7;color:var(--muted)') + '">' + icon('bell') + '</div><div class="grow"><div class="' + (n.unread ? 'bold' : '') + '">' + esc(n.title) + '</div>' +
+      '<div class="xs muted">' + esc(n.message).substr(0, 90) + '</div></div><span class="xs muted nowrap">' + fmt.date(String(n.date).substr(0, 10)) + '</span></li>';
+  };
+  parts.paymentItem = function (p) {
+    return '<li class="list-item"><div class="avatar" style="background:var(--success-50);color:var(--success)">' + icon('rupee') + '</div><div class="grow"><div class="bold">' + esc(p.studentName) + '</div>' +
+      '<div class="xs muted">' + esc(p.feeType) + ' \u00B7 ' + fmt.date(p.date) + ' \u00B7 ' + esc(String(p.mode).replace('_', ' ')) + '</div></div><b>' + fmt.money(p.amount) + '</b></li>';
+  };
+
+  /* ---------------------------------------------------------- render */
+  App.pages.dashboard = {
+    render: function (root, params, token) {
+      var role = App.state.user.role;
+      return App.api('dashboard.get', { fresh: !!(params && params.fresh) }).then(function (d) {
+        if (!App.stillHere(token)) return;
+        if (role === 'ADMIN') admin(root, d); else if (role === 'TEACHER') teacher(root, d); else student(root, d);
+      });
+    }
+  };
+
+  function head(name, sub, actions) {
+    return ui.pageHead(greeting() + ', ' + name, sub, actions);
+  }
+
+  /* ------------------------------------------------------------ admin */
+  function admin(root, d) {
+    var s = d.stats, a = d.attendance;
+    App.setApprovals(s.pending);
+    var h = head('Admin', 'Here is what is happening at the institute today (' + fmt.date(d.today) + ').',
+      '<button type="button" class="btn secondary" ' + goAttr('dashboard', { fresh: true }) + '>' + icon('refresh') + ' Refresh</button><button type="button" class="btn" ' + goAttr('attendance') + '>' + icon('clipboard') + ' Attendance</button>');
+    if (s.pending) h += '<div class="alert-strip"><div class="alert warning" ' + goAttr('approvals') + '>' + icon('user-check') + '<div class="grow"><b>' + s.pending + ' registration' + (s.pending === 1 ? '' : 's') + ' waiting for approval</b></div>' + icon('chevron-right') + '</div></div>';
+    h += '<div class="grid c4" style="margin-bottom:16px">' +
+      ui.stat('users', fmt.num(s.students), 'Active students') + ui.stat('briefcase', fmt.num(s.teachers), 'Active teachers', 'secondary') +
+      ui.stat('layers', fmt.num(s.batches), 'Active batches', 'warning') +
+      ui.stat('clipboard', a.scheduled ? a.marked + '/' + a.scheduled : '\u2014', a.scheduled ? 'Batches marked today' : 'No classes scheduled today', a.scheduled && a.marked < a.scheduled ? 'warning' : 'success') + '</div>';
+    h += '<div class="grid c3" style="margin-bottom:16px">' +
+      ui.stat('rupee', fmt.money(s.outstanding), 'Outstanding fees (' + s.studentsWithDues + ' students)', 'error') +
+      ui.stat('credit-card', fmt.money(s.collectedThisMonth), 'Collected this month', 'success') +
+      ui.stat('check-circle', a.marked ? a.percent + '%' : '\u2014', 'Attendance today (marked batches)', 'secondary') + '</div>';
+    h += '<div class="grid c2">' +
+      panel('Attendance not marked today', 'attendance', list(d.pendingBatches, function (b) {
+        return '<li class="list-item"><div class="grow"><div class="bold">' + esc(b.batch) + ' <span class="muted">\u00B7 ' + esc(b.subject) + '</span></div><div class="xs muted">' + esc(b.teacherName) + (b.time ? ' \u00B7 ' + esc(b.time) : '') + '</div></div>' +
+          '<button type="button" class="btn sm" ' + goAttr('attendance', { batch: b.batch }) + '>Mark</button></li>';
+      }, 'All scheduled batches are marked. \uD83C\uDF89'), 'Open attendance') +
+      panel('Recent payments', 'fees', list(d.recentPayments, parts.paymentItem, 'No payments recorded yet.')) +
+      panel('Upcoming events', 'events', list(d.upcomingEvents, parts.eventItem, 'No upcoming events.')) +
+      panel('Recent assignments', 'assignments', list(d.recentAssignments, function (a) { return parts.assignmentItem(a, { showBatch: true }); }, 'No assignments yet.')) +
+      panel('Recent notifications', 'notifications', list(d.recentNotifications, parts.noteItem, 'No notifications sent yet.')) + '</div>';
+    root.innerHTML = h;
+  }
+
+  /* ---------------------------------------------------------- teacher */
+  function teacher(root, d) {
+    var s = d.stats;
+    var h = head(App.state.user.name.split(' ')[0], 'Today is ' + fmt.date(d.today) + '.',
+      '<button type="button" class="btn" ' + goAttr('attendance') + '>' + icon('clipboard') + ' Take attendance</button><button type="button" class="btn secondary" ' + goAttr('assignments', { create: true }) + '>' + icon('plus') + ' New assignment</button>');
+    h += '<div class="grid c4" style="margin-bottom:16px">' +
+      ui.stat('layers', s.batches, 'My batches') + ui.stat('users', s.students, 'My students', 'secondary') +
+      ui.stat('clock', s.classesToday, 'Classes today', 'warning') + ui.stat('clipboard', s.attendancePending, 'Attendance pending', s.attendancePending ? 'error' : 'success') + '</div>';
+    h += '<div class="grid c2">' +
+      panel('Today\u2019s classes', 'timetable', list(d.todayClasses, function (c) {
+        return '<li class="list-item"><div class="grow"><div class="bold">' + esc(c.batch) + ' <span class="muted">\u00B7 ' + esc(c.subject) + '</span></div><div class="xs muted">' + esc(c.time || 'Time not set') + ' \u00B7 ' + c.students + ' students</div></div>' +
+          (c.marked ? ui.badge('Marked', 'success') + ' ' : '') + '<button type="button" class="btn sm ' + (c.marked ? 'secondary' : '') + '" ' + goAttr('attendance', { batch: c.batch }) + '>' + (c.marked ? 'Edit' : 'Take attendance') + '</button></li>';
+      }, 'No classes scheduled today. Enjoy your day!'), 'Timetable') +
+      panel('Recent assignments', 'assignments', list(d.recentAssignments, function (a) { return parts.assignmentItem(a, { showBatch: true }); }, 'You have not posted any assignments yet.')) +
+      panel('Recent study material', 'materials', list(d.recentMaterials, parts.materialItem, 'No study material uploaded yet.')) +
+      panel('Recent results entered', 'results', list(d.recentResults, function (r) {
+        return '<li class="list-item"><div class="avatar" style="background:var(--success-50);color:var(--success)">' + icon('award') + '</div><div class="grow"><div class="bold">' + esc(r.exam) + '</div><div class="xs muted">' + esc(r.batch) + ' \u00B7 ' + esc(r.subject) + '</div></div><span class="xs muted">' + fmt.date(r.date) + '</span></li>';
+      }, 'No results entered yet.')) +
+      panel('Upcoming events', 'events', list(d.upcomingEvents, parts.eventItem, 'No upcoming events.')) + '</div>';
+    root.innerHTML = h;
+  }
+
+  /* ---------------------------------------------------------- student */
+  function student(root, d) {
+    App.setUnread(d.unread || 0);
+    var h = head(d.name.split(' ')[0], 'Here is your overview for ' + fmt.date(d.today) + '.', '');
+    if (d.alerts.length) h += '<div class="alert-strip">' + d.alerts.map(function (a) { return '<div class="alert ' + a.tone + '" ' + goAttr(a.go) + '>' + icon(a.icon) + '<div class="grow">' + esc(a.text) + '</div>' + icon('chevron-right') + '</div>'; }).join('') + '</div>';
+    var att = d.attendance, f = d.fees, paidPct = f.finalFee ? Math.round(f.paid * 100 / f.finalFee) : 100;
+    h += '<div class="grid c3" style="margin-bottom:16px">' +
+      '<section class="card card-pad row nowrapflex" aria-label="Attendance">' + ui.donut(att.percent, 'attendance', d.threshold) + '<div><h3>Attendance</h3><p class="small muted">' + att.present + ' present \u00B7 ' + att.absent + ' absent</p><a href="#" class="small bold" data-go="attendance">View details</a></div></section>' +
+      '<section class="card card-pad" aria-label="Fees"><div class="row between"><h3>Fees</h3>' + (f.remaining > 0 ? ui.badge('Due', 'warning') : ui.badge(f.finalFee ? 'All paid' : 'No fees', 'success')) + '</div>' +
+      '<div class="stat" style="padding:10px 0"><div><div class="val">' + fmt.money(f.remaining) + '</div><div class="lbl">remaining of ' + fmt.money(f.finalFee) + '</div></div></div>' + ui.progress(paidPct, paidPct >= 100 ? 'success' : '') +
+      '<p class="xs muted" style="margin-top:8px">' + (f.nextDue ? 'Next due date: ' + fmt.date(f.nextDue) : '&nbsp;') + '</p><a href="#" class="small bold" data-go="fees">View fees &amp; receipts</a></section>' +
+      '<section class="card card-pad" aria-label="Next class"><h3>Next class</h3>' + (d.upcomingClasses.length ? '<div style="margin-top:10px"><div class="stat" style="padding:0"><div class="ico secondary">' + icon('clock') + '</div><div><div class="bold">' + esc(d.upcomingClasses[0].subject) + '</div><div class="small muted">' + esc(d.upcomingClasses[0].when) + (d.upcomingClasses[0].time ? ' \u00B7 ' + esc(d.upcomingClasses[0].time) : '') + '</div><div class="xs muted">' + esc(d.upcomingClasses[0].teacherName) + '</div></div></div></div>' : '<p class="small muted" style="margin-top:8px">No classes are scheduled.</p>') + '<a href="#" class="small bold" data-go="timetable" style="display:inline-block;margin-top:10px">Full timetable</a></section></div>';
+    h += '<div class="grid c2">' +
+      panel('Upcoming classes', 'timetable', list(d.upcomingClasses, function (c) {
+        return '<li class="list-item"><div class="avatar" style="background:var(--secondary-50);color:var(--secondary)">' + icon('clock') + '</div><div class="grow"><div class="bold">' + esc(c.subject) + '</div><div class="xs muted">' + esc(c.teacherName) + '</div></div><div class="right small"><b>' + esc(c.when) + '</b><div class="xs muted">' + esc(c.time) + '</div></div></li>';
+      }, 'No classes scheduled.')) +
+      panel('Assignments', 'assignments', list(d.upcomingAssignments, parts.assignmentItem, 'No pending assignments. \uD83C\uDF89')) +
+      panel('Recent results', 'results', list(d.recentResults, function (r) {
+        return '<li class="list-item"><div class="avatar" style="background:var(--success-50);color:var(--success)">' + icon('award') + '</div><div class="grow"><div class="bold">' + esc(r.exam) + '</div><div class="xs muted">' + fmt.num(r.total) + ' / ' + fmt.num(r.maxTotal) + ' marks \u00B7 ' + r.percentage + '%</div></div>' + ui.grade(r.grade) + '</li>';
+      }, 'No results published yet.')) +
+      panel('Study material', 'materials', list(d.recentMaterials, parts.materialItem, 'No study material yet.')) +
+      panel('Notifications', 'notifications', list(d.notifications, parts.noteItem, 'You have no notifications.')) + '</div>';
+    root.innerHTML = h;
+  }
+})();
+</script>

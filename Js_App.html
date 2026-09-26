@@ -1,0 +1,144 @@
+<script>
+/* Js_App — shell (sidebar, top bar, bottom nav), role-based navigation, router, boot */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, $$ = App.$$, esc = App.esc, icon = App.icon, ui = App.ui;
+
+  // [route, label, icon]
+  var NAV = {
+    ADMIN: [['dashboard', 'Dashboard', 'grid'], ['approvals', 'Approvals', 'user-check'], ['students', 'Students', 'users'], ['teachers', 'Teachers', 'briefcase'],
+      ['batches', 'Batches', 'layers'], ['attendance', 'Attendance', 'clipboard'], ['assignments', 'Assignments', 'file'], ['materials', 'Study Material', 'book'],
+      ['results', 'Results', 'award'], ['fees', 'Fees & Payments', 'rupee'], ['timetable', 'Timetable', 'clock'], ['events', 'Events', 'calendar'],
+      ['notifications', 'Notifications', 'bell'], ['settings', 'Settings', 'settings']],
+    TEACHER: [['dashboard', 'Dashboard', 'grid'], ['batches', 'My Batches', 'layers'], ['attendance', 'Attendance', 'clipboard'], ['assignments', 'Assignments', 'file'],
+      ['materials', 'Study Material', 'book'], ['results', 'Results', 'award'], ['timetable', 'Timetable', 'clock'], ['events', 'Events', 'calendar'], ['notifications', 'Notifications', 'bell']],
+    STUDENT: [['dashboard', 'Dashboard', 'grid'], ['timetable', 'Timetable', 'clock'], ['attendance', 'Attendance', 'clipboard'], ['assignments', 'Assignments', 'file'],
+      ['materials', 'Study Material', 'book'], ['results', 'Results', 'award'], ['fees', 'Fees', 'rupee'], ['events', 'Events', 'calendar'], ['notifications', 'Notifications', 'bell']]
+  };
+  var BOTTOM = { ADMIN: ['dashboard', 'students', 'attendance', 'fees'], TEACHER: ['dashboard', 'attendance', 'assignments', 'results'], STUDENT: ['dashboard', 'attendance', 'assignments', 'fees'] };
+  var ROLE_LABEL = { ADMIN: 'Administrator', TEACHER: 'Teacher', STUDENT: 'Student' };
+
+  function navFor() { return NAV[App.state.user.role] || []; }
+  function label(route) { var n = navFor().filter(function (x) { return x[0] === route; })[0]; return n ? n[1] : ''; }
+
+  App.renderShell = function () {
+    var u = App.state.user, info = App.state.info || {}, nav = navFor();
+    var side = nav.map(function (n) {
+      return '<a href="#" data-go="' + n[0] + '" data-nav="' + n[0] + '">' + icon(n[2]) + '<span>' + esc(n[1]) + '</span>' + (n[0] === 'approvals' ? '<span class="count hidden" id="cnt-approvals"></span>' : '') + '</a>';
+    }).join('');
+    var bottom = BOTTOM[u.role].map(function (r) {
+      var n = nav.filter(function (x) { return x[0] === r; })[0];
+      return '<a href="#" data-go="' + r + '" data-nav="' + r + '">' + icon(n[2]) + '<span>' + esc(n[1].split(' ')[0]) + '</span></a>';
+    }).join('') + '<a href="#" data-more>' + icon('menu') + '<span>More</span></a>';
+    $('#app').innerHTML =
+      '<div class="shell"><aside class="sidebar" id="sidebar" aria-label="Main navigation">' +
+      '<div class="brand"><div class="logo">' + App.logoHtml(info) + '</div><div><div class="name">' + esc(info.name || 'Success Coaching Classes') + '</div><div class="role">' + esc(ROLE_LABEL[u.role]) + ' portal</div></div></div>' +
+      '<nav class="nav">' + side + '</nav><div class="side-foot">' + esc(info.academicYear ? 'Academic year ' + info.academicYear : '') + '</div></aside>' +
+      '<div class="scrim" id="scrim"></div>' +
+      '<div class="main"><header class="topbar"><button type="button" class="icon-btn menu-btn" id="menu-btn" aria-label="Open menu">' + icon('menu') + '</button>' +
+      '<h2 id="page-title"></h2><div class="grow"></div>' +
+      '<button type="button" class="icon-btn" id="bell" aria-label="Notifications" data-go="notifications">' + icon('bell') + '<span class="dot hidden" id="bell-dot"></span></button>' +
+      '<button type="button" class="user-chip" id="user-chip" aria-haspopup="true" aria-expanded="false">' + ui.avatar(u.name) + '<span class="who"><b>' + esc(u.name) + '</b><span>' + esc(ROLE_LABEL[u.role]) + '</span></span></button></header>' +
+      '<main class="view" id="view" tabindex="-1" aria-live="polite"></main></div>' +
+      '<nav class="bottom-nav" aria-label="Quick navigation">' + bottom + '</nav></div>';
+    App.setUnread(App.state.user.unread || 0);
+  };
+
+  App.setUnread = function (n) {
+    App.state.unread = n;
+    var d = $('#bell-dot');
+    if (d) { d.textContent = n > 99 ? '99+' : n; d.classList.toggle('hidden', !n); }
+  };
+  App.setApprovals = function (n) {
+    var c = $('#cnt-approvals');
+    if (c) { c.textContent = n; c.classList.toggle('hidden', !n); }
+  };
+  App.refreshMe = function (force) {
+    var now = Date.now();
+    if (!force && now - (App.state.lastMe || 0) < 120000) return;
+    App.state.lastMe = now;
+    App.api('auth.me').then(function (d) { App.state.user = d.user; App.setUnread(d.user.unread || 0); }).catch(function () { /* ignore */ });
+  };
+
+  function closeDrawer() { var s = $('#sidebar'), sc = $('#scrim'); if (s) s.classList.remove('open'); if (sc) sc.classList.remove('show'); }
+  function closeMenu() { var m = $('#user-menu'); if (m) m.remove(); var c = $('#user-chip'); if (c) c.setAttribute('aria-expanded', 'false'); }
+
+  App.go = function (route, params) {
+    var u = App.state.user;
+    if (!u) return;
+    if (!App.pages[route] || !navFor().some(function (n) { return n[0] === route; })) route = 'dashboard';
+    App.state.route = route; App.state.params = params || {};
+    $$('[data-nav]').forEach(function (a) { if (a.dataset.nav === route) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+    $('#page-title').textContent = label(route);
+    document.title = label(route) + ' \u2014 ' + (App.state.info.name || 'Portal');
+    closeDrawer(); closeMenu();
+    var view = $('#view');
+    view.innerHTML = ui.pageSkeleton();
+    view.scrollTop = 0; window.scrollTo(0, 0);
+    var token = (App.state.navToken = (App.state.navToken || 0) + 1);
+    try {
+      var r = App.pages[route].render(view, App.state.params, token);
+      if (r && r.catch) r.catch(function (e) { if (token === App.state.navToken) pageError(view, e); });
+    } catch (e) { pageError(view, e); }
+    if (u.role !== 'ADMIN') App.refreshMe(false);
+  };
+  /** Pages call this to check they are still the visible page before painting async results. */
+  App.stillHere = function (token) { return token === App.state.navToken; };
+
+  function pageError(view, e) {
+    if (e && e.code === 'AUTH') return;
+    view.innerHTML = '<div class="card">' + ui.empty({ icon: 'alert', title: 'This page could not be loaded', text: (e && e.message) || 'Please try again.', action: '<button type="button" class="btn" id="retry-page">Try again</button>' }) + '</div>';
+    var b = $('#retry-page'); if (b) b.onclick = function () { App.go(App.state.route, App.state.params); };
+  }
+
+  App.startSession = function (d) {
+    App.state.token = d.token; App.state.user = d.user; App.state.info = d.info || App.state.info; App.state.cache = {}; App.state.lastMe = Date.now();
+    App.store.set('scc_token', d.token);
+    App.renderShell();
+    App.go('dashboard');
+  };
+
+  // shell-level events (delegated once)
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('#menu-btn')) { $('#sidebar').classList.add('open'); $('#scrim').classList.add('show'); return; }
+    if (e.target.closest('#scrim')) { closeDrawer(); return; }
+    if (e.target.closest('[data-more]')) { e.preventDefault(); $('#sidebar').classList.add('open'); $('#scrim').classList.add('show'); return; }
+    var chip = e.target.closest('#user-chip');
+    if (chip) {
+      if ($('#user-menu')) { closeMenu(); return; }
+      var u = App.state.user, m = document.createElement('div');
+      m.className = 'menu'; m.id = 'user-menu'; m.setAttribute('role', 'menu');
+      m.innerHTML = '<div style="padding:10px 12px;border-bottom:1px solid var(--border);margin-bottom:4px"><b class="small">' + esc(u.name) + '</b><div class="xs muted">' + esc(u.username) + '</div></div>' +
+        '<button type="button" role="menuitem" data-menu="pw">' + icon('lock') + ' Change password</button><button type="button" role="menuitem" data-menu="out">' + icon('logout') + ' Sign out</button>';
+      $('.main').appendChild(m); chip.setAttribute('aria-expanded', 'true');
+      return;
+    }
+    var mi = e.target.closest('[data-menu]');
+    if (mi) { closeMenu(); if (mi.dataset.menu === 'out') App.logout(); else App.changePasswordDialog(); return; }
+    if (!e.target.closest('#user-menu')) closeMenu();
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeMenu(); closeDrawer(); } });
+
+  /* ---------------------------------------------------------------- boot */
+  function boot() {
+    App.api('public.info').then(function (info) {
+      App.state.info = info;
+      document.title = (info.name || 'Portal') + ' Portal';
+      var t = App.store.get('scc_token');
+      if (!t) { App.renderAuth('login'); return; }
+      App.state.token = t;
+      return App.api('auth.me').then(function (d) {
+        App.state.user = d.user; App.state.info = d.info; App.state.lastMe = Date.now();
+        App.renderShell(); App.go('dashboard');
+      }).catch(function (e) {
+        if (e.code !== 'AUTH') App.renderAuth('login');
+      });
+    }).catch(function (e) {
+      $('#app').innerHTML = '<div style="min-height:100vh;display:grid;place-items:center;padding:24px"><div class="card card-pad center" style="max-width:420px">' +
+        ui.empty({ icon: 'alert', title: 'Portal is not available', text: e.message || 'Please try again in a moment.', action: '<button type="button" class="btn" onclick="location.reload()">Reload</button>' }) + '</div></div>';
+    });
+  }
+  App.boot = boot;
+  boot();
+})();
+</script>

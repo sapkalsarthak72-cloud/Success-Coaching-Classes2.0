@@ -1,0 +1,194 @@
+<script>
+/* Js_Content — Assignments, Study Material, Events */
+(function () {
+  'use strict';
+  var App = window.App, $ = App.$, $$ = App.$$, esc = App.esc, icon = App.icon, ui = App.ui, fmt = App.fmt;
+
+  /* ============================================== generic content pages */
+  function makePage(cfg) {
+    return {
+      render: function (root, params, token) {
+        var isStaff = App.state.user.role !== 'STUDENT';
+        root.innerHTML = ui.pageHead(cfg.title, isStaff ? cfg.staffSub : cfg.studentSub, isStaff ? '<button type="button" class="btn" id="add-c">' + icon('plus') + ' New ' + cfg.noun + '</button>' : '') + '<div id="clist"></div>';
+        return App.batches().then(function (batches) {
+          if (!App.stillHere(token)) return;
+          if (isStaff) staffList(cfg, batches, params);
+          else studentList(cfg, batches);
+        });
+      }
+    };
+  }
+
+  function staffList(cfg, batches, params) {
+    var active = batches.filter(function (b) { return b.status === 'ACTIVE'; });
+    var ctrl = ui.dataList({
+      root: $('#clist'), pageSize: 20, fetch: function (p) { return App.api(cfg.list, p); },
+      filters: [{ key: 'q', type: 'search', placeholder: 'Search by title or subject' },
+        { key: 'batch', type: 'select', placeholder: 'All batches', options: App.batchOptions(batches) },
+        { key: 'status', type: 'select', placeholder: 'All statuses', options: [{ value: 'PUBLISHED', label: 'Published' }, { value: 'ARCHIVED', label: 'Archived' }] }],
+      empty: { icon: cfg.icon, title: 'No ' + cfg.plural + ' yet', text: 'Use the "New ' + cfg.noun + '" button to add one.' },
+      columns: [
+        { label: 'Title', render: function (x) { return '<div class="bold">' + esc(x.title) + '</div>' + (x.description ? '<div class="xs muted">' + esc(x.description).substr(0, 90) + '</div>' : ''); } },
+        { label: 'Batch', render: function (x) { return '<span class="tag">' + esc(x.batch) + '</span> <span class="xs muted">' + esc(x.subject) + '</span>'; } }
+      ].concat(cfg.staffColumns).concat([
+        { label: 'Status', render: function (x) { return ui.status(x.status); } },
+        { label: '', actions: true, render: function (x, i) {
+          return (x.hasFile ? ui.act('file', i, 'download', 'Download') : '') + (x.mine ? ui.act('edit', i, 'edit', 'Edit') + (x.status === 'PUBLISHED' ? ui.act('arch', i, 'folder', 'Archive') : ui.act('rest', i, 'refresh', 'Restore')) : '');
+        } }]),
+      onAction: function (act, x, c, btn) {
+        if (act === 'file') App.download(btn, cfg.file, idPayload(cfg, x));
+        else if (act === 'edit') form(cfg, active, x, c);
+        else {
+          var to = act === 'arch' ? 'ARCHIVED' : 'PUBLISHED', p = idPayload(cfg, x); p.status = to;
+          App.api(cfg.setStatus, p).then(function () { ui.toast(act === 'arch' ? 'Archived. Students can no longer see it.' : 'Restored.', 'success'); c.reload(); }).catch(App.fail);
+        }
+      }
+    });
+    $('#add-c').onclick = function () { form(cfg, active, null, ctrl); };
+    if (params && params.create) form(cfg, active, null, ctrl);
+  }
+  function idPayload(cfg, x) { var p = {}; p[cfg.idKey] = x[cfg.idKey]; return p; }
+
+  function form(cfg, active, x, ctrl) {
+    if (!x && !active.length) { ui.toast('There are no active batches yet. Ask the admin to create one.', 'error'); return; }
+    var fields = [];
+    if (!x) fields.push({ name: 'batch', label: 'Batch', type: 'select', required: true, full: true, options: App.batchOptions(active), blank: 'Select batch' });
+    fields.push({ name: 'title', label: 'Title', required: true, full: true, value: x && x.title, attrs: 'maxlength="120"' });
+    fields.push({ name: 'description', label: 'Description (optional)', type: 'textarea', full: true, value: x && x.description, attrs: 'maxlength="1000"' });
+    cfg.formFields(x).forEach(function (f) { fields.push(f); });
+    fields.push({ id: 'f-file', name: 'file', label: cfg.fileLabel + (x && x.hasFile ? ' (leave empty to keep "' + x.fileName + '")' : ''), type: 'file', full: true, accept: cfg.accept, required: !x && cfg.fileRequired, help: cfg.fileHelp });
+    ui.formModal({
+      title: (x ? 'Edit ' : 'New ') + cfg.noun, submitText: x ? 'Save changes' : 'Publish ' + cfg.noun, size: 'lg', fields: fields,
+      onSubmit: function (d, f) {
+        return ui.readFile($('#f-file', f), cfg.kind).then(function (file) {
+          var p = Object.assign({}, d); delete p.file;
+          if (file) p.file = file;
+          if (x) p[cfg.idKey] = x[cfg.idKey];
+          return App.api(cfg.save, p);
+        }).then(function () { ui.toast(cfg.noun.charAt(0).toUpperCase() + cfg.noun.slice(1) + (x ? ' updated.' : ' published. Students of the batch have been notified.'), 'success'); ctrl.reload(); });
+      }
+    });
+  }
+
+  function studentList(cfg, batches) {
+    var box = $('#clist'), items = [];
+    box.innerHTML = ui.skeleton(5);
+    App.api(cfg.list, { pageSize: 100 }).then(function (d) {
+      items = d.items;
+      var subjects = Object.keys(items.reduce(function (m, a) { m[a.subject] = 1; return m; }, {})).sort();
+      box.innerHTML = (items.length ? '<div class="toolbar"><div class="search">' + icon('search') + '<input class="input" id="sq" type="search" placeholder="Search" aria-label="Search"></div><select class="select" id="ss" aria-label="Subject">' + ui.opts(subjects, '', 'All subjects') + '</select></div>' : '') + '<div id="sl"></div>';
+      function paint() {
+        var q = ($('#sq') ? $('#sq').value : '').toLowerCase().trim(), s = $('#ss') ? $('#ss').value : '';
+        var rows = items.filter(function (a) { return (!s || a.subject === s) && (!q || (a.title + ' ' + a.description).toLowerCase().indexOf(q) >= 0); });
+        if (!rows.length) { $('#sl').innerHTML = '<div class="card">' + ui.empty({ icon: cfg.icon, title: items.length ? 'Nothing matches your search' : 'No ' + cfg.plural + ' yet', text: items.length ? '' : 'Your teachers have not posted any ' + cfg.plural + ' yet.' }) + '</div>'; return; }
+        var html = '', last = null;
+        rows.forEach(function (a, i) {
+          var g = cfg.group ? cfg.group(a) : null;
+          if (g !== last && g) { html += '<h2 style="margin:' + (last === null ? '0' : '22px') + ' 0 10px">' + esc(g) + '</h2>'; }
+          last = g;
+          html += '<article class="card card-pad row nowrapflex" style="margin-bottom:10px;align-items:flex-start"><div class="avatar" style="background:var(--' + (cfg.key === 'assignments' ? 'warning-50);color:var(--warning' : 'secondary-50);color:var(--secondary') + ')">' + icon(cfg.icon) + '</div>' +
+            '<div class="grow"><div class="row between nowrapflex" style="align-items:flex-start"><div><h3>' + esc(a.title) + '</h3><div class="xs muted">' + esc(a.subject) + ' \u00B7 ' + esc(a.createdBy || a.batch) + ' \u00B7 ' + cfg.studentMeta(a) + '</div></div>' + cfg.studentBadge(a) + '</div>' +
+            (a.description ? '<p class="small" style="margin-top:8px;white-space:pre-line">' + esc(a.description) + '</p>' : '') +
+            (a.hasFile ? '<div style="margin-top:10px"><button type="button" class="btn sm secondary" data-dl="' + i + '">' + icon('download') + ' Download ' + esc(a.fileName || 'file') + '</button></div>' : '') + '</div></article>';
+        });
+        $('#sl').innerHTML = html;
+        $('#sl').onclick = function (e) { var b = e.target.closest('[data-dl]'); if (b) App.download(b, cfg.file, idPayload(cfg, rows[+b.dataset.dl])); };
+      }
+      ['sq', 'ss'].forEach(function (id) { if ($('#' + id)) $('#' + id).addEventListener('input', paint); });
+      paint();
+    }).catch(function (e) { box.innerHTML = '<div class="card">' + ui.empty({ icon: 'alert', title: 'Could not load ' + cfg.plural, text: e.message }) + '</div>'; App.fail(e); });
+  }
+
+  App.pages.assignments = makePage({
+    key: 'assignments', title: 'Assignments', noun: 'assignment', plural: 'assignments', icon: 'file', kind: 'assignment', idKey: 'assignmentId',
+    list: 'assignments.list', save: 'assignments.save', setStatus: 'assignments.setStatus', file: 'assignments.file',
+    staffSub: 'Post homework for your batches. Students are notified automatically.', studentSub: 'Homework and tasks from your teachers.',
+    accept: '.pdf,application/pdf', fileLabel: 'PDF file (optional)', fileHelp: 'PDF only, up to 10 MB.', fileRequired: false,
+    formFields: function (x) { return [{ name: 'issueDate', label: 'Issue date', type: 'date', required: true, value: (x && x.issueDate) || fmt.today() }, { name: 'dueDate', label: 'Due date', type: 'date', required: true, value: x && x.dueDate }]; },
+    staffColumns: [{ label: 'Issued', render: function (x) { return fmt.date(x.issueDate); } }, { label: 'Due', render: function (x) { return fmt.date(x.dueDate) + '<div class="xs">' + ui.badge(fmt.due(x), x.overdue ? 'error' : 'info') + '</div>'; } }],
+    group: function (a) { return a.overdue ? 'Past due' : 'Upcoming'; },
+    studentMeta: function (a) { return 'Issued ' + fmt.date(a.issueDate) + ' \u00B7 Due ' + fmt.date(a.dueDate); },
+    studentBadge: function (a) { return ui.badge(fmt.due(a), a.overdue ? 'error' : (a.daysLeft <= 2 ? 'warning' : 'info')); }
+  });
+
+  App.pages.materials = makePage({
+    key: 'materials', title: 'Study material', noun: 'study material', plural: 'study materials', icon: 'book', kind: 'material', idKey: 'materialId',
+    list: 'materials.list', save: 'materials.save', setStatus: 'materials.setStatus', file: 'materials.file',
+    staffSub: 'Upload notes, worksheets and other files for your batches.', studentSub: 'Notes and files shared by your teachers.',
+    accept: '.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.jpg,.jpeg,.png', fileLabel: 'File', fileHelp: 'PDF, Word, PowerPoint, Excel, JPG or PNG \u2014 up to 10 MB.', fileRequired: true,
+    formFields: function () { return []; },
+    staffColumns: [{ label: 'Added', render: function (x) { return fmt.date(x.date); } }],
+    group: null, studentMeta: function (a) { return fmt.date(a.date); }, studentBadge: function () { return ''; }
+  });
+
+  /* ================================================================ EVENTS */
+  var EVENT_TYPES = ['Test', 'Holiday', 'Special Class', 'Parent Meeting', 'Institute Event'];
+  var TONE = { Holiday: 'success', Test: 'error', 'Parent Meeting': 'warning', 'Special Class': 'info' };
+
+  function targetOptions(batches) {
+    var o = [];
+    if (App.state.user.role === 'ADMIN') {
+      o.push({ value: 'ALL', label: 'Everyone' });
+      (App.state.info.classes || []).forEach(function (c) { o.push({ value: 'CLASS_' + c, label: 'All of Class ' + c }); });
+    }
+    batches.filter(function (b) { return b.status === 'ACTIVE'; }).forEach(function (b) { o.push({ value: b.batch, label: 'Batch ' + b.batch + ' \u2014 ' + b.subject }); });
+    return o;
+  }
+  function targetLabel(t) { return t === 'ALL' ? 'Everyone' : (/^CLASS_/.test(t) ? t.replace('CLASS_', 'Class ') : 'Batch ' + t); }
+
+  App.pages.events = {
+    render: function (root, params, token) {
+      var isStaff = App.state.user.role !== 'STUDENT', scope = 'upcoming';
+      root.innerHTML = ui.pageHead('Events', isStaff ? 'Tests, holidays, special classes and meetings.' : 'Tests, holidays and meetings for you.', isStaff ? '<button type="button" class="btn" id="add-ev">' + icon('plus') + ' New event</button>' : '') +
+        '<div class="tabs" role="tablist"><button type="button" class="tab" role="tab" data-scope="upcoming" aria-selected="true">Upcoming</button><button type="button" class="tab" role="tab" data-scope="past" aria-selected="false">Past</button></div><div id="evl">' + ui.skeleton(4) + '</div>';
+      var batches = [];
+      function load() {
+        $('#evl').innerHTML = ui.skeleton(4);
+        return App.api('events.list', { scope: scope, pageSize: 60 }).then(function (d) {
+          if (!App.stillHere(token)) return;
+          if (!d.items.length) { $('#evl').innerHTML = '<div class="card">' + ui.empty({ icon: 'calendar', title: scope === 'upcoming' ? 'No upcoming events' : 'No past events', text: isStaff && scope === 'upcoming' ? 'Create an event to inform students.' : '' }) + '</div>'; return; }
+          var html = '', lastMonth = '';
+          d.items.forEach(function (e, i) {
+            var m = fmt.monthLabel(String(e.date).substr(0, 7));
+            if (m !== lastMonth) { html += '<h2 style="margin:' + (lastMonth ? '22px' : '0') + ' 0 10px">' + esc(m) + '</h2>'; lastMonth = m; }
+            var dd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(e.date) || [];
+            html += '<article class="card card-pad row nowrapflex" style="margin-bottom:10px;align-items:flex-start"><div class="avatar" style="border-radius:12px;width:52px;height:52px;flex-direction:column;line-height:1.1"><b style="font-size:18px">' + (dd[3] ? +dd[3] : '') + '</b><span style="font-size:11px">' + esc(fmt.date(e.date).split(' ')[1] || '') + '</span></div>' +
+              '<div class="grow"><div class="row between nowrapflex" style="align-items:flex-start"><div><h3>' + esc(e.title) + '</h3><div class="xs muted">' + (e.time ? esc(e.time) + ' \u00B7 ' : '') + esc(targetLabel(e.target)) + (e.createdBy ? ' \u00B7 by ' + esc(e.createdBy) : '') + '</div></div>' + ui.badge(e.eventType, TONE[e.eventType] || 'primary') + '</div>' +
+              (e.description ? '<p class="small" style="margin-top:8px;white-space:pre-line">' + esc(e.description) + '</p>' : '') +
+              (e.mine ? '<div class="row" style="margin-top:10px"><button type="button" class="btn sm secondary" data-ed="' + i + '">' + icon('edit') + ' Edit</button><button type="button" class="btn sm secondary" data-del="' + i + '">' + icon('trash') + ' Delete</button></div>' : '') + '</div></article>';
+          });
+          $('#evl').innerHTML = html;
+          $('#evl').onclick = function (ev) {
+            var ed = ev.target.closest('[data-ed]'), del = ev.target.closest('[data-del]');
+            if (ed) eventForm(d.items[+ed.dataset.ed]);
+            else if (del) { var e2 = d.items[+del.dataset.del]; ui.confirm({ title: 'Delete event', danger: true, confirmText: 'Delete', message: 'Delete "' + e2.title + '"?' }).then(function (ok) { if (ok) App.api('events.remove', { eventId: e2.eventId }).then(function () { ui.toast('Event deleted.', 'success'); load(); }).catch(App.fail); }); }
+          };
+        }).catch(function (e) { $('#evl').innerHTML = '<div class="card">' + ui.empty({ icon: 'alert', title: 'Could not load events', text: e.message }) + '</div>'; App.fail(e); });
+      }
+      function eventForm(x) {
+        var opts = targetOptions(batches);
+        if (!opts.length) { ui.toast('There are no active batches to create an event for.', 'error'); return; }
+        ui.formModal({
+          title: x ? 'Edit event' : 'New event', submitText: x ? 'Save changes' : 'Create event', size: 'lg',
+          fields: [
+            { name: 'title', label: 'Title', required: true, full: true, value: x && x.title, attrs: 'maxlength="120"' },
+            { name: 'eventType', label: 'Type', type: 'select', required: true, options: EVENT_TYPES, value: x ? x.eventType : 'Test' },
+            { name: 'target', label: 'For', type: 'select', required: true, options: opts, value: x ? x.target : opts[0].value },
+            { name: 'date', label: 'Date', type: 'date', required: true, value: x ? x.date : fmt.today() },
+            { name: 'time', label: 'Time (optional)', value: x && x.time, placeholder: 'e.g. 5:00 PM', attrs: 'maxlength="20"' },
+            { name: 'description', label: 'Details (optional)', type: 'textarea', full: true, value: x && x.description, attrs: 'maxlength="500"' },
+            x ? null : { name: 'notify', label: 'Notify students', type: 'select', options: [{ value: 'yes', label: 'Yes \u2014 send a notification' }, { value: 'no', label: 'No' }], value: 'yes' }
+          ].filter(Boolean),
+          onSubmit: function (d) {
+            var p = Object.assign({}, d); if (x) p.eventId = x.eventId; else p.notify = d.notify !== 'no';
+            return App.api('events.save', p).then(function () { ui.toast(x ? 'Event updated.' : 'Event created.', 'success'); load(); });
+          }
+        });
+      }
+      root.querySelector('.tabs').onclick = function (e) { var t = e.target.closest('[data-scope]'); if (!t) return; scope = t.dataset.scope; $$('.tab', root).forEach(function (b) { b.setAttribute('aria-selected', b === t); }); load(); };
+      if (isStaff) $('#add-ev').onclick = function () { eventForm(null); };
+      return App.batches().then(function (b) { batches = b; return load(); });
+    }
+  };
+})();
+</script>
